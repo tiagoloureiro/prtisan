@@ -3,8 +3,8 @@ import { main } from "./cli.js";
 
 try {
   const exitCode = await main();
-  Bun.exit(exitCode);
+  process.exit(exitCode);
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error));
-  Bun.exit(1);
+  process.exit(1);
 }

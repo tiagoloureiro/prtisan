@@ -1,7 +1,13 @@
-import type { AgentTrainConfig, Issue, IssueRef, PullRequest, ReviewFinding } from "./types.js";
 import type { CommandRunner } from "./exec.js";
 import { mustRun, runJson } from "./exec.js";
 import { writeText } from "./fs.js";
+import type {
+  AgentTrainConfig,
+  Issue,
+  IssueRef,
+  PullRequest,
+  ReviewFinding,
+} from "./types.js";
 
 const ISSUE_JSON_FIELDS = [
   "number",
@@ -38,6 +44,19 @@ export interface CreateOrUpdatePrInput {
   readonly headBranch: string;
 }
 
+export interface GitHubIssueSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly state: string;
+}
+
+export interface CreateIssueInput {
+  readonly repo: string;
+  readonly title: string;
+  readonly body: string;
+}
+
 export interface PullRequestReviewInput {
   readonly repo: string;
   readonly pullNumber: number;
@@ -54,11 +73,13 @@ export interface PullRequestReviewInput {
 export class GitHubClient {
   constructor(
     private readonly runner: CommandRunner,
-    private readonly cwd: string,
+    private readonly cwd: string
   ) {}
 
   async assertReady(): Promise<void> {
-    const version = await mustRun(this.runner, "gh", ["--version"], { cwd: this.cwd });
+    const version = await mustRun(this.runner, "gh", ["--version"], {
+      cwd: this.cwd,
+    });
     const firstLine = version.stdout.split("\n")[0] ?? "";
     const match = /gh version (\d+)\.(\d+)\.(\d+)/.exec(firstLine);
     if (!match) {
@@ -68,7 +89,9 @@ export class GitHubClient {
     const major = Number(match[1]);
     const minor = Number(match[2]);
     if (major < 2 || (major === 2 && minor < 94)) {
-      throw new Error(`GitHub CLI 2.94+ is required for native issue dependencies. Found: ${firstLine}`);
+      throw new Error(
+        `GitHub CLI 2.94+ is required for native issue dependencies. Found: ${firstLine}`
+      );
     }
 
     await mustRun(this.runner, "gh", ["auth", "status"], { cwd: this.cwd });
@@ -76,18 +99,23 @@ export class GitHubClient {
 
   async listIssues(config: AgentTrainConfig): Promise<Issue[]> {
     try {
-      const raw = await runJson<unknown[]>(this.runner, "gh", [
-        "issue",
-        "list",
-        "--repo",
-        config.repo,
-        "--search",
-        config.issueQuery,
-        "--json",
-        ISSUE_JSON_FIELDS,
-        "--limit",
-        "1000",
-      ], { cwd: this.cwd });
+      const raw = await runJson<unknown[]>(
+        this.runner,
+        "gh",
+        [
+          "issue",
+          "list",
+          "--repo",
+          config.repo,
+          "--search",
+          config.issueQuery,
+          "--json",
+          ISSUE_JSON_FIELDS,
+          "--limit",
+          "1000",
+        ],
+        { cwd: this.cwd }
+      );
       return raw.map(normalizeIssue);
     } catch (error) {
       throw enrichDependencyFieldError(error);
@@ -96,15 +124,20 @@ export class GitHubClient {
 
   async getIssue(repo: string, issueNumber: number): Promise<Issue> {
     try {
-      const raw = await runJson<unknown>(this.runner, "gh", [
-        "issue",
-        "view",
-        String(issueNumber),
-        "--repo",
-        repo,
-        "--json",
-        ISSUE_JSON_FIELDS,
-      ], { cwd: this.cwd });
+      const raw = await runJson<unknown>(
+        this.runner,
+        "gh",
+        [
+          "issue",
+          "view",
+          String(issueNumber),
+          "--repo",
+          repo,
+          "--json",
+          ISSUE_JSON_FIELDS,
+        ],
+        { cwd: this.cwd }
+      );
       return normalizeIssue(raw);
     } catch (error) {
       throw enrichDependencyFieldError(error);
@@ -113,7 +146,11 @@ export class GitHubClient {
 
   async getRelatedIssues(repo: string, issue: Issue): Promise<Issue[]> {
     const numbers = new Set<number>();
-    for (const ref of [...issue.blockedBy, ...issue.blocking, ...issue.subIssues]) {
+    for (const ref of [
+      ...issue.blockedBy,
+      ...issue.blocking,
+      ...issue.subIssues,
+    ]) {
       numbers.add(ref.number);
     }
     if (issue.parent) numbers.add(issue.parent.number);
@@ -126,96 +163,199 @@ export class GitHubClient {
     return related;
   }
 
-  async createIssueComment(repo: string, issueNumber: number, body: string): Promise<void> {
-    const bodyFile = `/tmp/agent-train-issue-${issueNumber}-${crypto.randomUUID()}.md`;
-    await writeText(bodyFile, body);
-    try {
-      await mustRun(this.runner, "gh", [
+  async findIssueByBodyMarker(
+    repo: string,
+    marker: string
+  ): Promise<GitHubIssueSummary | undefined> {
+    const issues = await runJson<unknown[]>(
+      this.runner,
+      "gh",
+      [
         "issue",
-        "comment",
-        String(issueNumber),
+        "list",
         "--repo",
         repo,
-        "--body-file",
-        bodyFile,
-      ], { cwd: this.cwd });
+        "--state",
+        "all",
+        "--search",
+        `in:body ${marker}`,
+        "--json",
+        "number,title,url,state",
+        "--limit",
+        "1",
+      ],
+      { cwd: this.cwd }
+    );
+    return issues[0] ? normalizeIssueSummary(issues[0]) : undefined;
+  }
+
+  async createIssue(input: CreateIssueInput): Promise<GitHubIssueSummary> {
+    const bodyFile = `/tmp/agent-train-setup-issue-${crypto.randomUUID()}.md`;
+    await writeText(bodyFile, input.body);
+    try {
+      const result = await mustRun(
+        this.runner,
+        "gh",
+        [
+          "issue",
+          "create",
+          "--repo",
+          input.repo,
+          "--title",
+          input.title,
+          "--body-file",
+          bodyFile,
+        ],
+        { cwd: this.cwd }
+      );
+      const url = result.stdout.trim();
+      const number = Number(url.match(/\/issues\/(\d+)$/)?.[1]);
+      if (!Number.isInteger(number)) {
+        throw new Error(`Unable to parse created issue URL: ${url}`);
+      }
+      return {
+        number,
+        title: input.title,
+        url,
+        state: "OPEN",
+      };
     } finally {
       await this.runner.run("rm", ["-f", bodyFile]);
     }
   }
 
-  async getPullRequestByBranch(repo: string, branch: string): Promise<PullRequest | undefined> {
-    const prs = await runJson<unknown[]>(this.runner, "gh", [
-      "pr",
-      "list",
-      "--repo",
-      repo,
-      "--head",
-      branch,
-      "--state",
-      "all",
-      "--json",
-      PR_JSON_FIELDS,
-      "--limit",
-      "1",
-    ], { cwd: this.cwd });
+  async createIssueComment(
+    repo: string,
+    issueNumber: number,
+    body: string
+  ): Promise<void> {
+    const bodyFile = `/tmp/agent-train-issue-${issueNumber}-${crypto.randomUUID()}.md`;
+    await writeText(bodyFile, body);
+    try {
+      await mustRun(
+        this.runner,
+        "gh",
+        [
+          "issue",
+          "comment",
+          String(issueNumber),
+          "--repo",
+          repo,
+          "--body-file",
+          bodyFile,
+        ],
+        { cwd: this.cwd }
+      );
+    } finally {
+      await this.runner.run("rm", ["-f", bodyFile]);
+    }
+  }
+
+  async getPullRequestByBranch(
+    repo: string,
+    branch: string
+  ): Promise<PullRequest | undefined> {
+    const prs = await runJson<unknown[]>(
+      this.runner,
+      "gh",
+      [
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--head",
+        branch,
+        "--state",
+        "all",
+        "--json",
+        PR_JSON_FIELDS,
+        "--limit",
+        "1",
+      ],
+      { cwd: this.cwd }
+    );
     return prs[0] ? normalizePullRequest(prs[0]) : undefined;
   }
 
   async getPullRequest(repo: string, pullNumber: number): Promise<PullRequest> {
-    const raw = await runJson<unknown>(this.runner, "gh", [
-      "pr",
-      "view",
-      String(pullNumber),
-      "--repo",
-      repo,
-      "--json",
-      PR_JSON_FIELDS,
-    ], { cwd: this.cwd });
+    const raw = await runJson<unknown>(
+      this.runner,
+      "gh",
+      [
+        "pr",
+        "view",
+        String(pullNumber),
+        "--repo",
+        repo,
+        "--json",
+        PR_JSON_FIELDS,
+      ],
+      { cwd: this.cwd }
+    );
     return normalizePullRequest(raw);
   }
 
-  async createOrUpdatePullRequest(input: CreateOrUpdatePrInput): Promise<PullRequest> {
-    const existing = await this.getPullRequestByBranch(input.repo, input.headBranch);
+  async createOrUpdatePullRequest(
+    input: CreateOrUpdatePrInput
+  ): Promise<PullRequest> {
+    const existing = await this.getPullRequestByBranch(
+      input.repo,
+      input.headBranch
+    );
     const bodyFile = `/tmp/agent-train-pr-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, input.body);
 
     try {
       if (existing) {
-        await mustRun(this.runner, "gh", [
+        await mustRun(
+          this.runner,
+          "gh",
+          [
+            "pr",
+            "edit",
+            String(existing.number),
+            "--repo",
+            input.repo,
+            "--base",
+            input.baseBranch,
+            "--title",
+            input.title,
+            "--body-file",
+            bodyFile,
+          ],
+          { cwd: this.cwd }
+        );
+        return this.getPullRequest(input.repo, existing.number);
+      }
+
+      await mustRun(
+        this.runner,
+        "gh",
+        [
           "pr",
-          "edit",
-          String(existing.number),
+          "create",
           "--repo",
           input.repo,
           "--base",
           input.baseBranch,
+          "--head",
+          input.headBranch,
           "--title",
           input.title,
           "--body-file",
           bodyFile,
-        ], { cwd: this.cwd });
-        return this.getPullRequest(input.repo, existing.number);
-      }
+        ],
+        { cwd: this.cwd }
+      );
 
-      await mustRun(this.runner, "gh", [
-        "pr",
-        "create",
-        "--repo",
+      const created = await this.getPullRequestByBranch(
         input.repo,
-        "--base",
-        input.baseBranch,
-        "--head",
-        input.headBranch,
-        "--title",
-        input.title,
-        "--body-file",
-        bodyFile,
-      ], { cwd: this.cwd });
-
-      const created = await this.getPullRequestByBranch(input.repo, input.headBranch);
+        input.headBranch
+      );
       if (!created) {
-        throw new Error(`Created PR for ${input.headBranch}, but gh could not find it afterward.`);
+        throw new Error(
+          `Created PR for ${input.headBranch}, but gh could not find it afterward.`
+        );
       }
       return created;
     } finally {
@@ -223,44 +363,53 @@ export class GitHubClient {
     }
   }
 
-  async editPullRequestBase(repo: string, pullNumber: number, baseBranch: string): Promise<void> {
-    await mustRun(this.runner, "gh", [
-      "pr",
-      "edit",
-      String(pullNumber),
-      "--repo",
-      repo,
-      "--base",
-      baseBranch,
-    ], { cwd: this.cwd });
+  async editPullRequestBase(
+    repo: string,
+    pullNumber: number,
+    baseBranch: string
+  ): Promise<void> {
+    await mustRun(
+      this.runner,
+      "gh",
+      ["pr", "edit", String(pullNumber), "--repo", repo, "--base", baseBranch],
+      { cwd: this.cwd }
+    );
   }
 
-  async editPullRequestBody(repo: string, pullNumber: number, body: string): Promise<void> {
+  async editPullRequestBody(
+    repo: string,
+    pullNumber: number,
+    body: string
+  ): Promise<void> {
     const bodyFile = `/tmp/agent-train-pr-${pullNumber}-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, body);
     try {
-      await mustRun(this.runner, "gh", [
-        "pr",
-        "edit",
-        String(pullNumber),
-        "--repo",
-        repo,
-        "--body-file",
-        bodyFile,
-      ], { cwd: this.cwd });
+      await mustRun(
+        this.runner,
+        "gh",
+        [
+          "pr",
+          "edit",
+          String(pullNumber),
+          "--repo",
+          repo,
+          "--body-file",
+          bodyFile,
+        ],
+        { cwd: this.cwd }
+      );
     } finally {
       await this.runner.run("rm", ["-f", bodyFile]);
     }
   }
 
   async getPullRequestDiff(repo: string, pullNumber: number): Promise<string> {
-    const result = await mustRun(this.runner, "gh", [
-      "pr",
-      "diff",
-      String(pullNumber),
-      "--repo",
-      repo,
-    ], { cwd: this.cwd });
+    const result = await mustRun(
+      this.runner,
+      "gh",
+      ["pr", "diff", String(pullNumber), "--repo", repo],
+      { cwd: this.cwd }
+    );
     return result.stdout;
   }
 
@@ -278,7 +427,7 @@ export class GitHubClient {
           body: input.body,
           comments: input.comments,
         }),
-      },
+      }
     );
   }
 
@@ -286,27 +435,37 @@ export class GitHubClient {
     repo: string,
     pullNumber: number,
     headSha: string,
-    method: "squash" | "merge" | "rebase" = "squash",
+    method: "squash" | "merge" | "rebase" = "squash"
   ): Promise<void> {
-    const methodFlag = method === "squash" ? "--squash" : method === "merge" ? "--merge" : "--rebase";
-    await mustRun(this.runner, "gh", [
-      "pr",
-      "merge",
-      String(pullNumber),
-      "--repo",
-      repo,
-      methodFlag,
-      "--auto",
-      "--match-head-commit",
-      headSha,
-    ], { cwd: this.cwd });
+    const methodFlag =
+      method === "squash"
+        ? "--squash"
+        : method === "merge"
+          ? "--merge"
+          : "--rebase";
+    await mustRun(
+      this.runner,
+      "gh",
+      [
+        "pr",
+        "merge",
+        String(pullNumber),
+        "--repo",
+        repo,
+        methodFlag,
+        "--auto",
+        "--match-head-commit",
+        headSha,
+      ],
+      { cwd: this.cwd }
+    );
   }
 
   async waitForPullRequestMerged(
     repo: string,
     pullNumber: number,
     timeoutMs = 15 * 60 * 1000,
-    intervalMs = 15_000,
+    intervalMs = 15_000
   ): Promise<PullRequest> {
     const startedAt = Date.now();
 
@@ -314,7 +473,9 @@ export class GitHubClient {
       const pr = await this.getPullRequest(repo, pullNumber);
       if (pr.state === "MERGED") return pr;
       if (pr.state === "CLOSED") {
-        throw new Error(`PR #${pullNumber} closed without reporting MERGED state.`);
+        throw new Error(
+          `PR #${pullNumber} closed without reporting MERGED state.`
+        );
       }
       await Bun.sleep(intervalMs);
     }
@@ -323,30 +484,49 @@ export class GitHubClient {
   }
 }
 
-export function isPullRequestGreen(pr: PullRequest): { ok: true } | { ok: false; reason: string } {
-  if (pr.isDraft) return { ok: false, reason: `PR #${pr.number} is still a draft.` };
+export function isPullRequestGreen(
+  pr: PullRequest
+): { ok: true } | { ok: false; reason: string } {
+  if (pr.isDraft)
+    return { ok: false, reason: `PR #${pr.number} is still a draft.` };
   if (pr.reviewDecision === "CHANGES_REQUESTED") {
     return { ok: false, reason: `PR #${pr.number} has requested changes.` };
   }
   if (pr.reviewDecision === "REVIEW_REQUIRED") {
-    return { ok: false, reason: `PR #${pr.number} is still waiting for required review approval.` };
+    return {
+      ok: false,
+      reason: `PR #${pr.number} is still waiting for required review approval.`,
+    };
   }
 
   const mergeState = pr.mergeStateStatus?.toUpperCase();
-  if (mergeState && ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNKNOWN"].includes(mergeState)) {
-    return { ok: false, reason: `PR #${pr.number} is not mergeable yet (${mergeState}).` };
+  if (
+    mergeState &&
+    ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNKNOWN"].includes(mergeState)
+  ) {
+    return {
+      ok: false,
+      reason: `PR #${pr.number} is not mergeable yet (${mergeState}).`,
+    };
   }
 
   const checks = pr.statusCheckRollup ?? [];
   const failing = checks.filter((check) => {
     if (typeof check !== "object" || check === null) return false;
     const value = check as Record<string, unknown>;
-    const conclusion = String(value.conclusion ?? value.state ?? value.status ?? "").toUpperCase();
-    return !["", "SUCCESS", "SKIPPED", "NEUTRAL", "COMPLETED"].includes(conclusion);
+    const conclusion = String(
+      value.conclusion ?? value.state ?? value.status ?? ""
+    ).toUpperCase();
+    return !["", "SUCCESS", "SKIPPED", "NEUTRAL", "COMPLETED"].includes(
+      conclusion
+    );
   });
 
   if (failing.length > 0) {
-    return { ok: false, reason: `PR #${pr.number} has ${failing.length} non-green status check(s).` };
+    return {
+      ok: false,
+      reason: `PR #${pr.number} has ${failing.length} non-green status check(s).`,
+    };
   }
 
   return { ok: true };
@@ -383,9 +563,27 @@ function normalizePullRequest(raw: unknown): PullRequest {
     headRefName: stringField(value, "headRefName"),
     baseRefName: stringField(value, "baseRefName"),
     headRefOid: stringField(value, "headRefOid"),
-    mergeStateStatus: typeof value.mergeStateStatus === "string" ? value.mergeStateStatus : undefined,
-    reviewDecision: typeof value.reviewDecision === "string" ? value.reviewDecision : undefined,
-    statusCheckRollup: Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : [],
+    mergeStateStatus:
+      typeof value.mergeStateStatus === "string"
+        ? value.mergeStateStatus
+        : undefined,
+    reviewDecision:
+      typeof value.reviewDecision === "string"
+        ? value.reviewDecision
+        : undefined,
+    statusCheckRollup: Array.isArray(value.statusCheckRollup)
+      ? value.statusCheckRollup
+      : [],
+  };
+}
+
+function normalizeIssueSummary(raw: unknown): GitHubIssueSummary {
+  const value = objectRecord(raw, "issue summary");
+  return {
+    number: numberField(value, "number"),
+    title: stringField(value, "title"),
+    url: stringField(value, "url"),
+    state: stringField(value, "state"),
   };
 }
 
@@ -399,7 +597,11 @@ function normalizeLabels(value: unknown): string[] {
   return value
     .map((label) => {
       if (typeof label === "string") return label;
-      if (typeof label === "object" && label !== null && typeof (label as { name?: unknown }).name === "string") {
+      if (
+        typeof label === "object" &&
+        label !== null &&
+        typeof (label as { name?: unknown }).name === "string"
+      ) {
         return (label as { name: string }).name;
       }
       return undefined;
@@ -412,23 +614,30 @@ function normalizeRefs(value: unknown): IssueRef[] {
 
   const values = Array.isArray(value)
     ? value
-    : typeof value === "object" && value !== null && Array.isArray((value as { nodes?: unknown }).nodes)
-      ? ((value as { nodes: unknown[] }).nodes)
+    : typeof value === "object" &&
+        value !== null &&
+        Array.isArray((value as { nodes?: unknown }).nodes)
+      ? (value as { nodes: unknown[] }).nodes
       : typeof value === "object" && value !== null && "number" in value
         ? [value]
         : [];
 
   return values
-    .map((item) => {
+    .map((item): IssueRef | undefined => {
       if (typeof item !== "object" || item === null) return undefined;
       const record = item as Record<string, unknown>;
       if (typeof record.number !== "number") return undefined;
       return {
         number: record.number,
         title: typeof record.title === "string" ? record.title : undefined,
-        state: record.state === "CLOSED" ? "CLOSED" : record.state === "OPEN" ? "OPEN" : undefined,
+        state:
+          record.state === "CLOSED"
+            ? "CLOSED"
+            : record.state === "OPEN"
+              ? "OPEN"
+              : undefined,
         url: typeof record.url === "string" ? record.url : undefined,
-      } satisfies IssueRef;
+      };
     })
     .filter((ref): ref is IssueRef => Boolean(ref));
 }
@@ -456,9 +665,13 @@ function numberField(value: Record<string, unknown>, field: string): number {
 
 function enrichDependencyFieldError(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.includes("blockedBy") || message.includes("blocking") || message.includes("subIssues")) {
+  if (
+    message.includes("blockedBy") ||
+    message.includes("blocking") ||
+    message.includes("subIssues")
+  ) {
     return new Error(
-      `${message}\nGitHub native issue dependency fields are required. Upgrade gh to 2.94+ and confirm this repository exposes issue dependencies.`,
+      `${message}\nGitHub native issue dependency fields are required. Upgrade gh to 2.94+ and confirm this repository exposes issue dependencies.`
     );
   }
   return error instanceof Error ? error : new Error(message);

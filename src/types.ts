@@ -95,7 +95,10 @@ export interface IssueTrainRecord {
   readonly blockers: readonly number[];
   readonly syntheticBase?: string;
   readonly status: IssueRunStatus;
-  readonly pr?: Pick<PullRequest, "number" | "url" | "headRefName" | "baseRefName" | "headRefOid">;
+  readonly pr?: Pick<
+    PullRequest,
+    "number" | "url" | "headRefName" | "baseRefName" | "headRefOid"
+  >;
   readonly commits: readonly string[];
   readonly lastError?: string;
   readonly validation?: {

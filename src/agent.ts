@@ -1,3 +1,13 @@
+import { z } from "zod";
+
+import { reviewSandboxBranch } from "./branching.js";
+import { ensureDir, pathExists, readText, writeText } from "./fs.js";
+import { joinPath, resolvePath } from "./path.js";
+import {
+  buildImplementPrompt,
+  buildRepairPrompt,
+  buildReviewPrompt,
+} from "./prompts.js";
 import type {
   AgentRunOutcome,
   AgentTrainConfig,
@@ -7,15 +17,6 @@ import type {
   ReviewFinding,
   ReviewReport,
 } from "./types.js";
-import {
-  buildImplementPrompt,
-  buildRepairPrompt,
-  buildReviewPrompt,
-} from "./prompts.js";
-import { ensureDir, pathExists, readText, writeText } from "./fs.js";
-import { joinPath, resolvePath } from "./path.js";
-import { z } from "zod";
-import { reviewSandboxBranch } from "./branching.js";
 
 const SANDBOX_CODEX_HOME = "/home/agent/.codex-agent-train";
 const ReviewOutputSchema = z.object({
@@ -30,7 +31,7 @@ const ReviewOutputSchema = z.object({
         path: z.string().optional(),
         line: z.number().int().positive().optional(),
         side: z.enum(["RIGHT", "LEFT"]).optional(),
-      }),
+      })
     )
     .default([]),
 });
@@ -92,12 +93,19 @@ export class SandcastleCodexRunner implements AgentRunner {
     });
   }
 
-  async reviewPullRequest(input: ReviewPullRequestInput): Promise<ReviewReport> {
+  async reviewPullRequest(
+    input: ReviewPullRequestInput
+  ): Promise<ReviewReport> {
     const result = await this.runCodex({
       cwd: input.cwd,
       config: input.config,
       trainId: input.trainId,
-      branch: reviewSandboxBranch(input.config, input.trainId, input.prNumber, input.axis),
+      branch: reviewSandboxBranch(
+        input.config,
+        input.trainId,
+        input.prNumber,
+        input.axis
+      ),
       baseBranch: input.branch,
       name: `review-${input.axis}-${input.prNumber}`,
       model: input.config.models.review,
@@ -111,10 +119,15 @@ export class SandcastleCodexRunner implements AgentRunner {
       },
     });
 
-    return parseReviewReport(result.structuredOutput ?? result.stdout, input.axis);
+    return parseReviewReport(
+      result.structuredOutput ?? result.stdout,
+      input.axis
+    );
   }
 
-  async repairPullRequest(input: RepairPullRequestInput): Promise<AgentRunOutcome> {
+  async repairPullRequest(
+    input: RepairPullRequestInput
+  ): Promise<AgentRunOutcome> {
     return this.runCodex({
       cwd: input.cwd,
       config: input.config,
@@ -153,12 +166,14 @@ export class SandcastleCodexRunner implements AgentRunner {
       "trains",
       input.trainId,
       "logs",
-      `${input.name}-${Date.now()}.log`,
+      `${input.name}-${Date.now()}.log`
     );
-    await ensureDir(joinPath(input.cwd, ".sandcastle", "trains", input.trainId, "logs"));
+    await ensureDir(
+      joinPath(input.cwd, ".sandcastle", "trains", input.trainId, "logs")
+    );
 
-    const sandcastle = (await import("@ai-hero/sandcastle")) as Record<string, any>;
-    const sandboxes = (await import("@ai-hero/sandcastle/sandboxes/docker")) as Record<string, any>;
+    const sandcastle = await import("@ai-hero/sandcastle");
+    const sandboxes = await import("@ai-hero/sandcastle/sandboxes/docker");
 
     const mounts = [
       {
@@ -223,28 +238,41 @@ export class SandcastleCodexRunner implements AgentRunner {
       output,
     });
 
+    const structuredOutput = "output" in result ? result.output : undefined;
+
     return {
       branch: result.branch ?? input.branch,
       commits: Array.isArray(result.commits)
         ? result.commits
             .map((commit: { sha?: string }) => commit.sha)
-            .filter((sha: string | undefined): sha is string => typeof sha === "string" && sha.length > 0)
+            .filter(
+              (sha: string | undefined): sha is string =>
+                typeof sha === "string" && sha.length > 0
+            )
         : [],
       stdout: String(result.stdout ?? ""),
-      structuredOutput: result.output,
+      structuredOutput,
       logFilePath: result.logFilePath ?? logPath,
       sessionId: result.iterations?.at?.(-1)?.sessionId,
     };
   }
 }
 
-export async function prepareCodexHome(cwd: string, config: AgentTrainConfig): Promise<string> {
+export async function prepareCodexHome(
+  cwd: string,
+  config: AgentTrainConfig
+): Promise<string> {
   const codexHome = resolvePath(cwd, config.docker.codexHome);
   const skillsDir = joinPath(codexHome, "skills", "code-review");
   await ensureDir(skillsDir);
   await ensureDir(joinPath(codexHome, "sessions"));
 
-  const skillSource = joinPath(import.meta.dir, "vendor", "code-review", "SKILL.md");
+  const skillSource = joinPath(
+    import.meta.dir,
+    "vendor",
+    "code-review",
+    "SKILL.md"
+  );
   await writeText(joinPath(skillsDir, "SKILL.md"), await readText(skillSource));
 
   const configPath = joinPath(codexHome, "config.toml");
@@ -255,14 +283,17 @@ export async function prepareCodexHome(cwd: string, config: AgentTrainConfig): P
         `model = "${config.models.implementation}"`,
         `model_reasoning_effort = "${config.reasoning.implementation}"`,
         "",
-      ].join("\n"),
+      ].join("\n")
     );
   }
 
   return codexHome;
 }
 
-export function parseReviewReport(output: unknown, axis: ReviewAxis): ReviewReport {
+export function parseReviewReport(
+  output: unknown,
+  axis: ReviewAxis
+): ReviewReport {
   if (typeof output !== "string") {
     return normalizeReviewReport(output, axis);
   }
@@ -272,14 +303,24 @@ export function parseReviewReport(output: unknown, axis: ReviewAxis): ReviewRepo
   try {
     parsed = JSON.parse(stripJsonFence(jsonText));
   } catch (error) {
-    throw new Error(`Review agent did not return valid JSON for ${axis}: ${error}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Review agent did not return valid JSON for ${axis}: ${message}`,
+      { cause: error }
+    );
   }
 
   return normalizeReviewReport(parsed, axis);
 }
 
-function normalizeReviewReport(parsed: unknown, axis: ReviewAxis): ReviewReport {
-  const value = typeof parsed === "object" && parsed !== null ? (parsed as Partial<ReviewReport>) : {};
+function normalizeReviewReport(
+  parsed: unknown,
+  axis: ReviewAxis
+): ReviewReport {
+  const value =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as Partial<ReviewReport>)
+      : {};
   const findings = Array.isArray(value.findings)
     ? value.findings.map((finding) => normalizeFinding(finding, axis))
     : [];
@@ -303,7 +344,10 @@ function stripJsonFence(text: string): string {
 }
 
 function normalizeFinding(value: unknown, axis: ReviewAxis): ReviewFinding {
-  const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const record =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : {};
   const severity = record.severity === "advisory" ? "advisory" : "blocking";
   return {
     axis,
@@ -312,6 +356,11 @@ function normalizeFinding(value: unknown, axis: ReviewAxis): ReviewFinding {
     body: typeof record.body === "string" ? record.body : "",
     path: typeof record.path === "string" ? record.path : undefined,
     line: typeof record.line === "number" ? record.line : undefined,
-    side: record.side === "LEFT" ? "LEFT" : record.side === "RIGHT" ? "RIGHT" : undefined,
+    side:
+      record.side === "LEFT"
+        ? "LEFT"
+        : record.side === "RIGHT"
+          ? "RIGHT"
+          : undefined,
   };
 }

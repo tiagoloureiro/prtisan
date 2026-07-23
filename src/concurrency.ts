@@ -1,7 +1,7 @@
 export async function mapLimit<T, R>(
   values: readonly T[],
   limit: number,
-  task: (value: T, index: number) => Promise<R>,
+  task: (value: T, index: number) => Promise<R>
 ): Promise<R[]> {
   if (limit < 1) {
     throw new Error("Concurrency limit must be at least 1.");
@@ -23,7 +23,9 @@ export async function mapLimit<T, R>(
   return results;
 }
 
-export function createLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+export function createLimiter(
+  limit: number
+): <T>(task: () => Promise<T>) => Promise<T> {
   if (limit < 1) {
     throw new Error("Concurrency limit must be at least 1.");
   }

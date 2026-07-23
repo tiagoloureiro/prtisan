@@ -1,6 +1,6 @@
-import type { PullRequest, ReviewFinding } from "./types.js";
 import { findDiffPosition, parseUnifiedDiff } from "./diff.js";
 import { reviewFindingBody } from "./github.js";
+import type { PullRequest, ReviewFinding } from "./types.js";
 
 export interface PreparedReview {
   readonly event: "COMMENT" | "REQUEST_CHANGES";
@@ -47,7 +47,9 @@ export function preparePullRequestReview(input: {
     summaryFindings.push(finding);
   }
 
-  const event = input.findings.some((finding) => finding.severity === "blocking")
+  const event = input.findings.some(
+    (finding) => finding.severity === "blocking"
+  )
     ? "REQUEST_CHANGES"
     : "COMMENT";
 
@@ -64,7 +66,7 @@ export function preparePullRequestReview(input: {
 
 function buildReviewSummaryBody(
   findings: readonly ReviewFinding[],
-  summaryFindings: readonly ReviewFinding[],
+  summaryFindings: readonly ReviewFinding[]
 ): string {
   if (findings.length === 0) {
     return "Agent train validation completed with no findings.";
@@ -80,8 +82,10 @@ function buildReviewSummaryBody(
     ...summaryFindings.map(
       (finding) =>
         `- **${finding.severity} ${finding.axis}: ${finding.title}**${
-          finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ""})` : ""
-        }\n  ${finding.body}`,
+          finding.path
+            ? ` (${finding.path}${finding.line ? `:${finding.line}` : ""})`
+            : ""
+        }\n  ${finding.body}`
     ),
   ].join("\n");
 }

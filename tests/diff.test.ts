@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { findDiffPosition, parseUnifiedDiff } from "../src/diff.js";
-import { preparePullRequestReview } from "../src/review.js";
-import type { PullRequest, ReviewFinding } from "../src/types.js";
+
+import { findDiffPosition, parseUnifiedDiff } from "@/diff.js";
+import { preparePullRequestReview } from "@/review.js";
+import type { PullRequest, ReviewFinding } from "@/types.js";
 
 const diff = `diff --git a/src/a.ts b/src/a.ts
 index 111..222 100644
@@ -22,9 +23,15 @@ describe("diff mapping", () => {
   test("maps new and old lines to GitHub diff positions", () => {
     const lines = parseUnifiedDiff(diff);
 
-    expect(findDiffPosition(lines, { path: "src/a.ts", line: 2, side: "LEFT" })).toBe(2);
-    expect(findDiffPosition(lines, { path: "src/a.ts", line: 3, side: "RIGHT" })).toBe(4);
-    expect(findDiffPosition(lines, { path: "src/a.ts", line: 12, side: "RIGHT" })).toBe(7);
+    expect(
+      findDiffPosition(lines, { path: "src/a.ts", line: 2, side: "LEFT" })
+    ).toBe(2);
+    expect(
+      findDiffPosition(lines, { path: "src/a.ts", line: 3, side: "RIGHT" })
+    ).toBe(4);
+    expect(
+      findDiffPosition(lines, { path: "src/a.ts", line: 12, side: "RIGHT" })
+    ).toBe(7);
   });
 
   test("keeps unmappable findings in review body", () => {

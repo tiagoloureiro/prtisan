@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { GitHubClient, isPullRequestGreen } from "../src/github.js";
+
+import { GitHubClient, isPullRequestGreen } from "@/github.js";
+import type { AgentTrainConfig } from "@/types.js";
+
 import { FakeRunner } from "./helpers.js";
-import type { AgentTrainConfig } from "../src/types.js";
 
 const config = {
   repo: "o/r",
@@ -25,7 +27,7 @@ describe("GitHubClient", () => {
           parent: null,
           subIssues: { nodes: [{ number: 3, title: "Child" }] },
         },
-      ]),
+      ])
     );
 
     const issues = await new GitHubClient(runner, "/repo").listIssues(config);
@@ -74,7 +76,7 @@ describe("GitHubClient", () => {
         headRefOid: "sha",
         reviewDecision: "REVIEW_REQUIRED",
         statusCheckRollup: [],
-      }),
+      })
     ).toEqual({
       ok: false,
       reason: "PR #12 is still waiting for required review approval.",

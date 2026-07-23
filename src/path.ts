@@ -12,7 +12,8 @@ export function joinPath(...parts: string[]): string {
 
   const startsAbsolute = isAbsolutePath(filtered[0] ?? "");
   const joined = normalizePath(filtered.join("/"));
-  const withoutTrailing = joined.length > 1 ? joined.replace(/\/+$/g, "") : joined;
+  const withoutTrailing =
+    joined.length > 1 ? joined.replace(/\/+$/g, "") : joined;
   return startsAbsolute && !withoutTrailing.startsWith("/")
     ? `/${withoutTrailing}`
     : withoutTrailing;

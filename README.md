@@ -5,10 +5,18 @@
 ## Commands
 
 ```bash
-bun run src/index.ts create-prs --cwd /path/to/repo
-bun run src/index.ts validate --cwd /path/to/repo --train-id <train-id>
-bun run src/index.ts merge --cwd /path/to/repo --train-id <train-id>
+bun run init --cwd /path/to/repo
+bun run create-prs --cwd /path/to/repo
+bun run validate --cwd /path/to/repo --train-id <train-id>
+bun run merge --cwd /path/to/repo --train-id <train-id>
 ```
+
+Bare `bun init` is Bun's package initializer, so `agent-train` uses package scripts for local development. After `bun run build`, the binary entrypoint is `agent-train init`, `agent-train create-prs`, `agent-train validate`, and `agent-train merge`.
+
+`init` creates the target repo scaffold:
+
+- GitHub git repo: writes the files in a temporary worktree, pushes `agent-train/setup`, creates or reuses a setup issue, and opens or updates the matching PR.
+- Non-git repo, or a repo not connected to GitHub through `gh`: writes the files directly into the target directory.
 
 ## Requirements
 
@@ -18,6 +26,57 @@ bun run src/index.ts merge --cwd /path/to/repo --train-id <train-id>
 - Git
 - Codex CLI
 - A target repository with `.sandcastle/agent-train.config.json`
+
+## Install the Binary
+
+For local development from this checkout:
+
+```bash
+bun install
+bun run link-bin
+agent-train --help
+```
+
+This builds `dist/index.js` and links the package globally with Bun. If `agent-train` is not found afterward, make sure Bun's global bin directory is on your `PATH`:
+
+```bash
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+```
+
+To stop using the linked binary:
+
+```bash
+bun unlink
+```
+
+## GitHub Releases
+
+Pushing a semver tag creates a GitHub Release containing:
+
+- `agent-train-<version>.tgz`
+- `SHA256SUMS`
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+For a public release, install the binary package with Bun:
+
+```bash
+bun install --global https://github.com/<owner>/<repo>/releases/download/v0.1.0/agent-train-0.1.0.tgz
+agent-train --help
+```
+
+For a private repo, download the release asset with `gh` first:
+
+```bash
+mkdir -p /tmp/agent-train-release
+gh release download v0.1.0 --repo <owner>/<repo> --pattern 'agent-train-*.tgz' --dir /tmp/agent-train-release
+bun install --global /tmp/agent-train-release/agent-train-0.1.0.tgz
+agent-train --help
+```
 
 Use a dedicated `.sandcastle/codex-home` and seed it with Codex authentication before running agents. Do not mount your full `~/.codex` into the sandbox.
 

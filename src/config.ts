@@ -1,9 +1,35 @@
 import { z } from "zod";
-import type { AgentTrainConfig } from "./types.js";
+
 import { pathExists, readJson } from "./fs.js";
 import { resolvePath } from "./path.js";
+import type { AgentTrainConfig } from "./types.js";
 
 const ReasoningSchema = z.enum(["low", "medium", "high", "xhigh"]);
+const DEFAULT_MODELS = {
+  implementation: "gpt-5.6-terra",
+  repair: "gpt-5.6-terra",
+  review: "gpt-5.6-luna",
+};
+const DEFAULT_REASONING = {
+  implementation: "medium",
+  repair: "medium",
+  review: "low",
+} satisfies AgentTrainConfig["reasoning"];
+const DEFAULT_CONCURRENCY = {
+  implement: 3,
+  validate: 4,
+  github: 4,
+};
+const DEFAULT_DOCKER = {
+  imageName: "sandcastle:agent-train",
+  codexHome: ".sandcastle/codex-home",
+  mounts: [],
+};
+const DEFAULT_RETENTION = {
+  ttlDays: 14,
+  maxLogBytes: 10 * 1024 * 1024,
+  keepSessions: true,
+};
 
 const ConfigSchema = z.object({
   repo: z.string().min(1),
@@ -14,29 +40,44 @@ const ConfigSchema = z.object({
   remote: z.string().min(1).default("origin"),
   models: z
     .object({
-      implementation: z.string().min(1).default("gpt-5.6-terra"),
-      repair: z.string().min(1).default("gpt-5.6-terra"),
-      review: z.string().min(1).default("gpt-5.6-luna"),
+      implementation: z.string().min(1).default(DEFAULT_MODELS.implementation),
+      repair: z.string().min(1).default(DEFAULT_MODELS.repair),
+      review: z.string().min(1).default(DEFAULT_MODELS.review),
     })
-    .default({}),
+    .default(DEFAULT_MODELS),
   reasoning: z
     .object({
-      implementation: ReasoningSchema.default("medium"),
-      repair: ReasoningSchema.default("medium"),
-      review: ReasoningSchema.default("low"),
+      implementation: ReasoningSchema.default(DEFAULT_REASONING.implementation),
+      repair: ReasoningSchema.default(DEFAULT_REASONING.repair),
+      review: ReasoningSchema.default(DEFAULT_REASONING.review),
     })
-    .default({}),
+    .default(DEFAULT_REASONING),
   concurrency: z
     .object({
-      implement: z.number().int().positive().max(32).default(3),
-      validate: z.number().int().positive().max(32).default(4),
-      github: z.number().int().positive().max(16).default(4),
+      implement: z
+        .number()
+        .int()
+        .positive()
+        .max(32)
+        .default(DEFAULT_CONCURRENCY.implement),
+      validate: z
+        .number()
+        .int()
+        .positive()
+        .max(32)
+        .default(DEFAULT_CONCURRENCY.validate),
+      github: z
+        .number()
+        .int()
+        .positive()
+        .max(16)
+        .default(DEFAULT_CONCURRENCY.github),
     })
-    .default({}),
+    .default(DEFAULT_CONCURRENCY),
   docker: z
     .object({
-      imageName: z.string().min(1).default("sandcastle:agent-train"),
-      codexHome: z.string().min(1).default(".sandcastle/codex-home"),
+      imageName: z.string().min(1).default(DEFAULT_DOCKER.imageName),
+      codexHome: z.string().min(1).default(DEFAULT_DOCKER.codexHome),
       cpus: z.number().positive().optional(),
       mounts: z
         .array(
@@ -44,23 +85,30 @@ const ConfigSchema = z.object({
             hostPath: z.string().min(1),
             sandboxPath: z.string().min(1),
             readonly: z.boolean().optional(),
-          }),
+          })
         )
         .default([]),
     })
-    .default({}),
+    .default(DEFAULT_DOCKER),
   retention: z
     .object({
-      ttlDays: z.number().int().positive().default(14),
-      maxLogBytes: z.number().int().positive().default(10 * 1024 * 1024),
-      keepSessions: z.boolean().default(true),
+      ttlDays: z.number().int().positive().default(DEFAULT_RETENTION.ttlDays),
+      maxLogBytes: z
+        .number()
+        .int()
+        .positive()
+        .default(DEFAULT_RETENTION.maxLogBytes),
+      keepSessions: z.boolean().default(DEFAULT_RETENTION.keepSessions),
     })
-    .default({}),
+    .default(DEFAULT_RETENTION),
 });
 
 export const DEFAULT_CONFIG_PATH = ".sandcastle/agent-train.config.json";
 
-export async function loadConfig(cwd: string, configPath = DEFAULT_CONFIG_PATH): Promise<AgentTrainConfig> {
+export async function loadConfig(
+  cwd: string,
+  configPath = DEFAULT_CONFIG_PATH
+): Promise<AgentTrainConfig> {
   const resolvedPath = resolvePath(cwd, configPath);
   if (!(await pathExists(resolvedPath))) {
     throw new Error(`Missing agent train config at ${resolvedPath}`);
@@ -68,7 +116,9 @@ export async function loadConfig(cwd: string, configPath = DEFAULT_CONFIG_PATH):
 
   const parsed = ConfigSchema.parse(await readJson<unknown>(resolvedPath));
   if (parsed.repo === "OWNER/REPO") {
-    throw new Error(`Configure "repo" in ${resolvedPath} before running agent-train.`);
+    throw new Error(
+      `Configure "repo" in ${resolvedPath} before running agent-train.`
+    );
   }
 
   return parsed;

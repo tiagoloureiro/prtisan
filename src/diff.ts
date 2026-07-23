@@ -88,11 +88,14 @@ export function parseUnifiedDiff(diff: string): DiffLine[] {
 
 export function findDiffPosition(
   diffLines: readonly DiffLine[],
-  location: ReviewLocation,
+  location: ReviewLocation
 ): number | undefined {
   const side = location.side ?? "RIGHT";
   return diffLines.find(
-    (line) => line.path === location.path && line.line === location.line && line.side === side,
+    (line) =>
+      line.path === location.path &&
+      line.line === location.line &&
+      line.side === side
   )?.position;
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parseReviewReport } from "../src/agent.js";
+
+import { parseReviewReport } from "@/agent.js";
 
 describe("agent review parsing", () => {
   test("parses fenced JSON inside review tags", () => {
@@ -9,13 +10,19 @@ describe("agent review parsing", () => {
         "```json",
         JSON.stringify({
           summary: "Needs work.",
-          findings: [{ severity: "blocking", title: "Missing check", body: "Add the guard." }],
+          findings: [
+            {
+              severity: "blocking",
+              title: "Missing check",
+              body: "Add the guard.",
+            },
+          ],
         }),
         "```",
         "</review>",
         "<promise>COMPLETE</promise>",
       ].join("\n"),
-      "spec",
+      "spec"
     );
 
     expect(report.axis).toBe("spec");

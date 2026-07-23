@@ -1,0 +1,9 @@
+repo_root=$(git rev-parse --show-toplevel)
+PATH="$repo_root/node_modules/.bin:$PATH"
+export PATH
+
+bunx lint-staged
+bun run lint
+bun run format:check
+bun run typecheck
+bun run test

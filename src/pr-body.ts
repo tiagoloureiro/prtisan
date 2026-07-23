@@ -1,7 +1,10 @@
-import type { IssueTrainRecord } from "./types.js";
 import { mergeMetadataIntoPrBody, trainMetadata } from "./state.js";
+import type { IssueTrainRecord } from "./types.js";
 
-export function buildPullRequestBody(record: IssueTrainRecord, trainId: string): string {
+export function buildPullRequestBody(
+  record: IssueTrainRecord,
+  trainId: string
+): string {
   const blockers =
     record.blockers.length === 0
       ? "None"
@@ -18,10 +21,12 @@ export function buildPullRequestBody(record: IssueTrainRecord, trainId: string):
       `- Base branch: \`${record.baseBranch}\``,
       record.baseAnchorSha ? `- Base anchor: \`${record.baseAnchorSha}\`` : "",
       `- Blocked by: ${blockers}`,
-      record.syntheticBase ? `- Synthetic base: \`${record.syntheticBase}\`` : "",
+      record.syntheticBase
+        ? `- Synthetic base: \`${record.syntheticBase}\``
+        : "",
     ]
       .filter(Boolean)
       .join("\n"),
-    trainMetadata(record, trainId),
+    trainMetadata(record, trainId)
   );
 }

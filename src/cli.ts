@@ -1,5 +1,6 @@
 import { SandcastleCodexRunner } from "./agent.js";
 import { executeCreatePrs } from "./commands/create-prs.js";
+import { executeInit, initSummary } from "./commands/init.js";
 import { executeMerge } from "./commands/merge.js";
 import { executeValidate } from "./commands/validate.js";
 import { loadConfig } from "./config.js";
@@ -15,14 +16,31 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     printHelp();
     return parsed.command ? 0 : 1;
   }
-  if (!["create-prs", "validate", "merge"].includes(parsed.command)) {
+  if (!["init", "create-prs", "validate", "merge"].includes(parsed.command)) {
     throw new Error(`Unknown command: ${parsed.command}`);
   }
 
   const cwd = parsed.options.cwd ?? Bun.env.PWD ?? ".";
-  const config = await loadConfig(cwd, parsed.options.config);
   const runner = new BunCommandRunner();
   const github = new GitHubClient(runner, cwd);
+
+  if (parsed.command === "init") {
+    const result = await executeInit(
+      {
+        cwd,
+        repo: parsed.options.repo,
+        targetBranch: parsed.options.targetBranch,
+        branch: parsed.options.branch,
+        remote: parsed.options.remote,
+        force: parsed.options.force,
+      },
+      { runner, github, log: console.error }
+    );
+    console.log(JSON.stringify(initSummary(result), null, 2));
+    return 0;
+  }
+
+  const config = await loadConfig(cwd, parsed.options.config);
   const git = new GitClient(runner, cwd, config);
   const agent = new SandcastleCodexRunner();
 
@@ -30,7 +48,9 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   await git.assertReady();
   await assertPreflight({ cwd, config, runner });
   await pruneTrainArtifacts({ cwd, config, runner }).catch((error) => {
-    console.error(`Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`
+    );
   });
 
   if (parsed.command === "create-prs") {
@@ -41,9 +61,18 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         trainId: parsed.options.trainId,
         dryRun: parsed.options.dryRun,
       },
-      { github, git, agent, log: console.error },
+      { github, git, agent, log: console.error }
     );
-    console.log(JSON.stringify({ trainId: state.trainId, statePath: `.sandcastle/trains/${state.trainId}/state.json` }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          trainId: state.trainId,
+          statePath: `.sandcastle/trains/${state.trainId}/state.json`,
+        },
+        null,
+        2
+      )
+    );
     return 0;
   }
 
@@ -60,7 +89,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         issueNumbers: parsed.options.issues,
         repair: parsed.options.repair,
       },
-      { github, git, agent, log: console.error },
+      { github, git, agent, log: console.error }
     );
     console.log(JSON.stringify(validationSummary(state), null, 2));
     return 0;
@@ -76,7 +105,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
           issueNumbers,
           repair: true,
         },
-        { github, git, agent, log: console.error },
+        { github, git, agent, log: console.error }
       );
     };
 
@@ -87,7 +116,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         trainId: parsed.options.trainId,
         validateAffected: parsed.options.validateAffected,
       },
-      { github, git, validateIssues, log: console.error },
+      { github, git, validateIssues, log: console.error }
     );
     console.log(JSON.stringify(mergeSummary(state), null, 2));
     return 0;
@@ -105,8 +134,13 @@ interface ParsedArgs {
 interface ParsedOptions {
   cwd?: string;
   config?: string;
+  repo?: string;
+  targetBranch?: string;
+  branch?: string;
+  remote?: string;
   trainId?: string;
   dryRun?: boolean;
+  force?: boolean;
   repair?: boolean;
   validateAffected?: boolean;
   issues?: readonly number[];
@@ -128,6 +162,14 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
       options.cwd = requireValue(rest, ++index, arg);
     } else if (arg === "--config") {
       options.config = requireValue(rest, ++index, arg);
+    } else if (arg === "--repo") {
+      options.repo = requireValue(rest, ++index, arg);
+    } else if (arg === "--target-branch") {
+      options.targetBranch = requireValue(rest, ++index, arg);
+    } else if (arg === "--branch") {
+      options.branch = requireValue(rest, ++index, arg);
+    } else if (arg === "--remote") {
+      options.remote = requireValue(rest, ++index, arg);
     } else if (arg === "--train-id") {
       options.trainId = requireValue(rest, ++index, arg);
     } else if (arg === "--issues") {
@@ -137,6 +179,8 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
         .filter((value) => Number.isInteger(value));
     } else if (arg === "--dry-run") {
       options.dryRun = true;
+    } else if (arg === "--force") {
+      options.force = true;
     } else if (arg === "--no-repair") {
       options.repair = false;
     } else if (arg === "--no-validate-affected") {
@@ -153,7 +197,11 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
   };
 }
 
-function requireValue(values: readonly string[], index: number, flag: string): string {
+function requireValue(
+  values: readonly string[],
+  index: number,
+  flag: string
+): string {
   const value = values[index];
   if (!value || value.startsWith("--")) {
     throw new Error(`${flag} requires a value.`);
@@ -161,7 +209,9 @@ function requireValue(values: readonly string[], index: number, flag: string): s
   return value;
 }
 
-function validationSummary(state: Awaited<ReturnType<typeof executeValidate>>): unknown {
+function validationSummary(
+  state: Awaited<ReturnType<typeof executeValidate>>
+): unknown {
   return {
     trainId: state.trainId,
     issues: Object.values(state.issues).map((record) => ({
@@ -173,7 +223,9 @@ function validationSummary(state: Awaited<ReturnType<typeof executeValidate>>): 
   };
 }
 
-function mergeSummary(state: Awaited<ReturnType<typeof executeMerge>>): unknown {
+function mergeSummary(
+  state: Awaited<ReturnType<typeof executeMerge>>
+): unknown {
   return {
     trainId: state.trainId,
     merged: Object.values(state.issues)
@@ -186,6 +238,7 @@ function printHelp(): void {
   console.log(`agent-train
 
 Usage:
+  agent-train init [--cwd <repo>] [--repo OWNER/REPO] [--target-branch <branch>] [--branch <branch>] [--remote <name>] [--force]
   agent-train create-prs [--cwd <repo>] [--config <path>] [--train-id <id>] [--dry-run]
   agent-train validate --train-id <id> [--cwd <repo>] [--issues 1,2] [--no-repair]
   agent-train merge --train-id <id> [--cwd <repo>] [--no-validate-affected]

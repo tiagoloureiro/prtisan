@@ -1,14 +1,14 @@
-import type { AgentTrainConfig } from "./types.js";
 import type { CommandRunner } from "./exec.js";
 import { mustRun } from "./exec.js";
 import { ensureDir } from "./fs.js";
 import { dirname, joinPath } from "./path.js";
+import type { AgentTrainConfig } from "./types.js";
 
 export class GitClient {
   constructor(
     private readonly runner: CommandRunner,
     private readonly cwd: string,
-    private readonly config: AgentTrainConfig,
+    private readonly config: AgentTrainConfig
   ) {}
 
   async assertReady(): Promise<void> {
@@ -16,14 +16,22 @@ export class GitClient {
   }
 
   async fetchBranch(branch: string): Promise<void> {
-    await mustRun(this.runner, "git", [
-      "fetch",
-      this.config.remote,
-      `refs/heads/${branch}:refs/remotes/${this.config.remote}/${branch}`,
-    ], { cwd: this.cwd });
+    await mustRun(
+      this.runner,
+      "git",
+      [
+        "fetch",
+        this.config.remote,
+        `refs/heads/${branch}:refs/remotes/${this.config.remote}/${branch}`,
+      ],
+      { cwd: this.cwd }
+    );
   }
 
-  async prepareBranchFromBase(branch: string, baseBranch: string): Promise<void> {
+  async prepareBranchFromBase(
+    branch: string,
+    baseBranch: string
+  ): Promise<void> {
     await this.fetchBranch(baseBranch);
     const remoteBranchExists = await this.branchExistsOnRemote(branch);
     if (remoteBranchExists) {
@@ -32,36 +40,46 @@ export class GitClient {
 
     await this.upsertLocalBranch(
       branch,
-      remoteBranchExists ? `${this.config.remote}/${branch}` : `${this.config.remote}/${baseBranch}`,
+      remoteBranchExists
+        ? `${this.config.remote}/${branch}`
+        : `${this.config.remote}/${baseBranch}`
     );
   }
 
   async pushBranch(branch: string): Promise<void> {
-    await mustRun(this.runner, "git", [
-      "push",
-      "--set-upstream",
-      this.config.remote,
-      branch,
-      "--force-with-lease",
-    ], { cwd: this.cwd });
+    await mustRun(
+      this.runner,
+      "git",
+      [
+        "push",
+        "--set-upstream",
+        this.config.remote,
+        branch,
+        "--force-with-lease",
+      ],
+      { cwd: this.cwd }
+    );
   }
 
   async branchExistsOnRemote(branch: string): Promise<boolean> {
-    const result = await this.runner.run("git", [
-      "ls-remote",
-      "--exit-code",
-      "--heads",
-      this.config.remote,
-      branch,
-    ], { cwd: this.cwd });
+    const result = await this.runner.run(
+      "git",
+      ["ls-remote", "--exit-code", "--heads", this.config.remote, branch],
+      { cwd: this.cwd }
+    );
     return result.exitCode === 0;
   }
 
   async revParseRemoteBranch(branch: string): Promise<string> {
     await this.fetchBranch(branch);
-    const result = await mustRun(this.runner, "git", ["rev-parse", `${this.config.remote}/${branch}`], {
-      cwd: this.cwd,
-    });
+    const result = await mustRun(
+      this.runner,
+      "git",
+      ["rev-parse", `${this.config.remote}/${branch}`],
+      {
+        cwd: this.cwd,
+      }
+    );
     return result.stdout.trim();
   }
 
@@ -77,7 +95,7 @@ export class GitClient {
       "trains",
       input.trainId,
       "worktrees",
-      `base-${input.issueNumber}`,
+      `base-${input.issueNumber}`
     );
 
     await this.clearManagedWorktree(worktreePath);
@@ -87,34 +105,58 @@ export class GitClient {
     }
 
     try {
-      await mustRun(this.runner, "git", [
-        "worktree",
-        "add",
-        "--force",
-        "--detach",
-        worktreePath,
-        `${this.config.remote}/${this.config.targetBranch}`,
-      ], { cwd: this.cwd });
+      await mustRun(
+        this.runner,
+        "git",
+        [
+          "worktree",
+          "add",
+          "--force",
+          "--detach",
+          worktreePath,
+          `${this.config.remote}/${this.config.targetBranch}`,
+        ],
+        { cwd: this.cwd }
+      );
 
-      await mustRun(this.runner, "git", ["switch", "-C", input.syntheticBranch], {
-        cwd: worktreePath,
-      });
+      await mustRun(
+        this.runner,
+        "git",
+        ["switch", "-C", input.syntheticBranch],
+        {
+          cwd: worktreePath,
+        }
+      );
 
       for (const branch of input.blockerBranches) {
-        await mustRun(this.runner, "git", ["merge", "--no-edit", "--no-ff", `${this.config.remote}/${branch}`], {
-          cwd: worktreePath,
-        });
+        await mustRun(
+          this.runner,
+          "git",
+          ["merge", "--no-edit", "--no-ff", `${this.config.remote}/${branch}`],
+          {
+            cwd: worktreePath,
+          }
+        );
       }
 
-      await mustRun(this.runner, "git", [
-        "push",
-        "--set-upstream",
-        this.config.remote,
-        input.syntheticBranch,
-        "--force-with-lease",
-      ], { cwd: worktreePath });
+      await mustRun(
+        this.runner,
+        "git",
+        [
+          "push",
+          "--set-upstream",
+          this.config.remote,
+          input.syntheticBranch,
+          "--force-with-lease",
+        ],
+        { cwd: worktreePath }
+      );
     } finally {
-      await this.runner.run("git", ["worktree", "remove", "--force", worktreePath], { cwd: this.cwd });
+      await this.runner.run(
+        "git",
+        ["worktree", "remove", "--force", worktreePath],
+        { cwd: this.cwd }
+      );
     }
   }
 
@@ -131,7 +173,7 @@ export class GitClient {
       "trains",
       input.trainId,
       "worktrees",
-      `restack-${input.issueNumber}`,
+      `restack-${input.issueNumber}`
     );
 
     await this.clearManagedWorktree(worktreePath);
@@ -139,56 +181,96 @@ export class GitClient {
     await this.fetchBranch(input.baseBranch);
 
     try {
-      await mustRun(this.runner, "git", [
-        "worktree",
-        "add",
-        "--force",
-        "-B",
-        input.branch,
-        worktreePath,
-        `${this.config.remote}/${input.branch}`,
-      ], { cwd: this.cwd });
+      await mustRun(
+        this.runner,
+        "git",
+        [
+          "worktree",
+          "add",
+          "--force",
+          "-B",
+          input.branch,
+          worktreePath,
+          `${this.config.remote}/${input.branch}`,
+        ],
+        { cwd: this.cwd }
+      );
 
       const nextBase = `${this.config.remote}/${input.baseBranch}`;
-      const nextBaseAnchorSha = await this.revParseRemoteBranch(input.baseBranch);
+      const nextBaseAnchorSha = await this.revParseRemoteBranch(
+        input.baseBranch
+      );
       const rebaseArgs = input.oldBaseAnchorSha
         ? ["rebase", "--onto", nextBase, input.oldBaseAnchorSha]
         : ["rebase", nextBase];
       await mustRun(this.runner, "git", rebaseArgs, { cwd: worktreePath });
-      await mustRun(this.runner, "git", ["push", this.config.remote, input.branch, "--force-with-lease"], {
-        cwd: worktreePath,
-      });
+      await mustRun(
+        this.runner,
+        "git",
+        ["push", this.config.remote, input.branch, "--force-with-lease"],
+        {
+          cwd: worktreePath,
+        }
+      );
       return nextBaseAnchorSha;
     } finally {
-      await this.runner.run("git", ["worktree", "remove", "--force", worktreePath], { cwd: this.cwd });
+      await this.runner.run(
+        "git",
+        ["worktree", "remove", "--force", worktreePath],
+        { cwd: this.cwd }
+      );
     }
   }
 
   async deleteRemoteBranch(branch: string): Promise<void> {
-    await this.runner.run("git", ["push", this.config.remote, "--delete", branch], { cwd: this.cwd });
+    await this.runner.run(
+      "git",
+      ["push", this.config.remote, "--delete", branch],
+      { cwd: this.cwd }
+    );
   }
 
-  private async upsertLocalBranch(branch: string, startPoint: string): Promise<void> {
+  private async upsertLocalBranch(
+    branch: string,
+    startPoint: string
+  ): Promise<void> {
     const exists = await this.localBranchExists(branch);
-    await mustRun(this.runner, "git", exists ? ["branch", "-f", branch, startPoint] : ["branch", branch, startPoint], {
-      cwd: this.cwd,
-    });
+    await mustRun(
+      this.runner,
+      "git",
+      exists
+        ? ["branch", "-f", branch, startPoint]
+        : ["branch", branch, startPoint],
+      {
+        cwd: this.cwd,
+      }
+    );
   }
 
   private async localBranchExists(branch: string): Promise<boolean> {
-    const result = await this.runner.run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
-      cwd: this.cwd,
-    });
+    const result = await this.runner.run(
+      "git",
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      {
+        cwd: this.cwd,
+      }
+    );
     return result.exitCode === 0;
   }
 
   private async clearManagedWorktree(worktreePath: string): Promise<void> {
     const managedRoot = joinPath(this.cwd, ".sandcastle", "trains");
     if (!worktreePath.startsWith(`${managedRoot}/`)) {
-      throw new Error(`Refusing to clear unmanaged worktree path: ${worktreePath}`);
+      throw new Error(
+        `Refusing to clear unmanaged worktree path: ${worktreePath}`
+      );
     }
 
-    await this.runner.run("git", ["worktree", "remove", "--force", worktreePath], { cwd: this.cwd });
+    await this.runner.run(
+      "git",
+      ["worktree", "remove", "--force", worktreePath],
+      { cwd: this.cwd }
+    );
     await this.runner.run("rm", ["-rf", worktreePath], { cwd: this.cwd });
     await ensureDir(dirname(worktreePath));
   }

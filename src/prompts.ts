@@ -83,7 +83,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
         ],
       },
       null,
-      2,
+      2
     ),
     "After the </review> tag, output <promise>COMPLETE</promise>.",
     "",
@@ -110,13 +110,20 @@ export function buildRepairPrompt(input: RepairPromptInput): string {
     relatedIssuesBlock(input.relatedIssues),
     "",
     "Blocking findings:",
-    JSON.stringify(input.findings.filter((finding) => finding.severity === "blocking"), null, 2),
+    JSON.stringify(
+      input.findings.filter((finding) => finding.severity === "blocking"),
+      null,
+      2
+    ),
   ].join("\n");
 }
 
 function relatedIssuesBlock(issues: readonly Issue[]): string {
   if (issues.length === 0) return "Related issues: none.";
-  return ["Related issues:", ...issues.map((issue) => issueBlock(`Issue #${issue.number}`, issue))].join("\n\n");
+  return [
+    "Related issues:",
+    ...issues.map((issue) => issueBlock(`Issue #${issue.number}`, issue)),
+  ].join("\n\n");
 }
 
 function issueBlock(label: string, issue: Issue): string {

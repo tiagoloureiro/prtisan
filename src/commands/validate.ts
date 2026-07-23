@@ -1,10 +1,16 @@
-import type { AgentRunner } from "../agent.js";
-import type { AgentTrainConfig, Issue, IssueTrainRecord, ReviewFinding, TrainState } from "../types.js";
-import { GitHubClient } from "../github.js";
-import { GitClient } from "../git.js";
-import { loadTrainState, saveTrainState, updateIssueRecord } from "../state.js";
-import { createLimiter, mapLimit } from "../concurrency.js";
-import { preparePullRequestReview } from "../review.js";
+import type { AgentRunner } from "@/agent.js";
+import { createLimiter, mapLimit } from "@/concurrency.js";
+import { GitClient } from "@/git.js";
+import { GitHubClient } from "@/github.js";
+import { preparePullRequestReview } from "@/review.js";
+import { loadTrainState, saveTrainState, updateIssueRecord } from "@/state.js";
+import type {
+  AgentTrainConfig,
+  Issue,
+  IssueTrainRecord,
+  ReviewFinding,
+  TrainState,
+} from "@/types.js";
 
 export interface ValidateInput {
   readonly cwd: string;
@@ -21,20 +27,26 @@ export interface ValidateDeps {
   readonly log?: (message: string) => void;
 }
 
-export async function executeValidate(input: ValidateInput, deps: ValidateDeps): Promise<TrainState> {
+export async function executeValidate(
+  input: ValidateInput,
+  deps: ValidateDeps
+): Promise<TrainState> {
   let state = await loadTrainState(input.cwd, input.trainId);
   const githubMutate = createLimiter(input.config.concurrency.github);
   const gitMutate = createLimiter(1);
   const stateMutation = createLimiter(1);
-  const issueNumbers = input.issueNumbers ?? Object.values(state.issues).map((record) => record.issue.number);
+  const issueNumbers =
+    input.issueNumbers ??
+    Object.values(state.issues).map((record) => record.issue.number);
   const wanted = new Set(issueNumbers);
   const records = Object.values(state.issues).filter(
-    (record) => wanted.has(record.issue.number) && record.pr && record.status !== "merged",
+    (record) =>
+      wanted.has(record.issue.number) && record.pr && record.status !== "merged"
   );
 
   const persistIssue = async (
     issueNumber: number,
-    update: Partial<IssueTrainRecord>,
+    update: Partial<IssueTrainRecord>
   ): Promise<IssueTrainRecord> =>
     stateMutation(async () => {
       state = updateIssueRecord(state, issueNumber, update);
@@ -43,17 +55,44 @@ export async function executeValidate(input: ValidateInput, deps: ValidateDeps):
     });
 
   await mapLimit(records, input.config.concurrency.validate, async (record) => {
-    deps.log?.(`Validating PR #${record.pr!.number} for issue #${record.issue.number}`);
-    await persistIssue(record.issue.number, { status: "validating", lastError: undefined });
-    await gitMutate(() => deps.git.prepareBranchFromBase(record.branch, record.baseBranch));
+    deps.log?.(
+      `Validating PR #${record.pr!.number} for issue #${record.issue.number}`
+    );
+    await persistIssue(record.issue.number, {
+      status: "validating",
+      lastError: undefined,
+    });
+    await gitMutate(() =>
+      deps.git.prepareBranchFromBase(record.branch, record.baseBranch)
+    );
 
-    let pr = await deps.github.getPullRequest(input.config.repo, record.pr!.number);
-    let diff = await deps.github.getPullRequestDiff(input.config.repo, pr.number);
-    const relatedIssues = await deps.github.getRelatedIssues(input.config.repo, record.issue);
-    let findings = await collectFindings(input, deps, record.issue.number, pr.number, record.branch, record.baseBranch, diff, relatedIssues);
+    let pr = await deps.github.getPullRequest(
+      input.config.repo,
+      record.pr!.number
+    );
+    let diff = await deps.github.getPullRequestDiff(
+      input.config.repo,
+      pr.number
+    );
+    const relatedIssues = await deps.github.getRelatedIssues(
+      input.config.repo,
+      record.issue
+    );
+    let findings = await collectFindings(
+      input,
+      deps,
+      record.issue.number,
+      pr.number,
+      record.branch,
+      record.baseBranch,
+      diff,
+      relatedIssues
+    );
     let repaired = false;
 
-    const blockingFindings = findings.filter((finding) => finding.severity === "blocking");
+    const blockingFindings = findings.filter(
+      (finding) => finding.severity === "blocking"
+    );
     if ((input.repair ?? true) && blockingFindings.length > 0) {
       const outcome = await deps.agent.repairPullRequest({
         cwd: input.cwd,
@@ -70,7 +109,10 @@ export async function executeValidate(input: ValidateInput, deps: ValidateDeps):
         repaired = true;
         await gitMutate(() => deps.git.pushBranch(record.branch));
         pr = await deps.github.getPullRequest(input.config.repo, pr.number);
-        diff = await deps.github.getPullRequestDiff(input.config.repo, pr.number);
+        diff = await deps.github.getPullRequestDiff(
+          input.config.repo,
+          pr.number
+        );
         findings = await collectFindings(
           input,
           deps,
@@ -79,7 +121,7 @@ export async function executeValidate(input: ValidateInput, deps: ValidateDeps):
           record.branch,
           record.baseBranch,
           diff,
-          relatedIssues,
+          relatedIssues
         );
       }
     }
@@ -98,10 +140,12 @@ export async function executeValidate(input: ValidateInput, deps: ValidateDeps):
         event: preparedReview.event,
         body: preparedReview.body,
         comments: preparedReview.comments,
-      }),
+      })
     );
 
-    const blockingCount = findings.filter((finding) => finding.severity === "blocking").length;
+    const blockingCount = findings.filter(
+      (finding) => finding.severity === "blocking"
+    ).length;
     const advisoryCount = findings.length - blockingCount;
     await persistIssue(record.issue.number, {
       status: blockingCount === 0 ? "validated" : "validation_failed",
@@ -133,11 +177,14 @@ async function collectFindings(
   branch: string,
   baseBranch: string,
   diff: string,
-  relatedIssues: readonly Issue[],
+  relatedIssues: readonly Issue[]
 ): Promise<ReviewFinding[]> {
   const state = await loadTrainState(input.cwd, input.trainId);
   const record = state.issues[String(issueNumber)];
-  if (!record) throw new Error(`Issue #${issueNumber} is not part of train ${input.trainId}.`);
+  if (!record)
+    throw new Error(
+      `Issue #${issueNumber} is not part of train ${input.trainId}.`
+    );
 
   const [standards, spec] = await Promise.all([
     deps.agent.reviewPullRequest({

@@ -1,10 +1,20 @@
-import type { AgentTrainConfig, IssueTrainRecord, TrainState } from "../types.js";
-import { GitHubClient, isPullRequestGreen } from "../github.js";
-import { GitClient } from "../git.js";
-import { buildIssueGraph, descendantsOf, planBranches } from "../graph.js";
-import { loadTrainState, saveTrainState, updateIssueRecord, updateSyntheticBase } from "../state.js";
+import { GitClient } from "@/git.js";
+import { GitHubClient, isPullRequestGreen } from "@/github.js";
+import { buildIssueGraph, descendantsOf, planBranches } from "@/graph.js";
+import { buildPullRequestBody } from "@/pr-body.js";
+import {
+  loadTrainState,
+  saveTrainState,
+  updateIssueRecord,
+  updateSyntheticBase,
+} from "@/state.js";
+import type {
+  AgentTrainConfig,
+  IssueTrainRecord,
+  TrainState,
+} from "@/types.js";
+
 import { selectedIssuesFromState } from "./create-prs.js";
-import { buildPullRequestBody } from "../pr-body.js";
 
 export interface MergeInput {
   readonly cwd: string;
@@ -20,7 +30,10 @@ export interface MergeDeps {
   readonly log?: (message: string) => void;
 }
 
-export async function executeMerge(input: MergeInput, deps: MergeDeps): Promise<TrainState> {
+export async function executeMerge(
+  input: MergeInput,
+  deps: MergeDeps
+): Promise<TrainState> {
   let state = await loadTrainState(input.cwd, input.trainId);
   const graph = buildIssueGraph(selectedIssuesFromState(state));
 
@@ -34,15 +47,26 @@ export async function executeMerge(input: MergeInput, deps: MergeDeps): Promise<
       throw new Error(`Issue #${issueNumber} is not validated cleanly.`);
     }
 
-    const pr = await deps.github.getPullRequest(input.config.repo, record.pr.number);
+    const pr = await deps.github.getPullRequest(
+      input.config.repo,
+      record.pr.number
+    );
     const green = isPullRequestGreen(pr);
     if (!green.ok) {
       throw new Error(green.reason);
     }
 
     deps.log?.(`Squash-merging PR #${pr.number} for issue #${issueNumber}`);
-    await deps.github.mergePullRequest(input.config.repo, pr.number, pr.headRefOid, "squash");
-    const mergedPr = await deps.github.waitForPullRequestMerged(input.config.repo, pr.number);
+    await deps.github.mergePullRequest(
+      input.config.repo,
+      pr.number,
+      pr.headRefOid,
+      "squash"
+    );
+    const mergedPr = await deps.github.waitForPullRequestMerged(
+      input.config.repo,
+      pr.number
+    );
     state = updateIssueRecord(state, issueNumber, {
       status: "merged",
       pr: {
@@ -79,7 +103,7 @@ async function restackDescendants(
   input: MergeInput,
   deps: MergeDeps,
   state: TrainState,
-  affected: readonly number[],
+  affected: readonly number[]
 ): Promise<TrainState> {
   const graph = buildIssueGraph(selectedIssuesFromState(state));
   const branchPlan = planBranches(graph, input.config, input.trainId);
@@ -94,7 +118,7 @@ async function restackDescendants(
       .map((blocker) => nextState.issues[String(blocker)])
       .filter(
         (blockerRecord): blockerRecord is IssueTrainRecord =>
-          Boolean(blockerRecord) && blockerRecord.status !== "merged",
+          Boolean(blockerRecord) && blockerRecord.status !== "merged"
       )
       .map((blockerRecord) => blockerRecord.branch);
 
@@ -132,13 +156,18 @@ async function restackDescendants(
     });
 
     if (record.pr && record.baseBranch !== nextBase) {
-      await deps.github.editPullRequestBase(input.config.repo, record.pr.number, nextBase);
+      await deps.github.editPullRequestBase(
+        input.config.repo,
+        record.pr.number,
+        nextBase
+      );
     }
 
     nextState = updateIssueRecord(nextState, issueNumber, {
       baseBranch: nextBase,
       baseAnchorSha,
-      syntheticBase: openBlockerBranches.length > 1 ? planned.syntheticBase : undefined,
+      syntheticBase:
+        openBlockerBranches.length > 1 ? planned.syntheticBase : undefined,
       pr: record.pr ? { ...record.pr, baseRefName: nextBase } : undefined,
       validation: undefined,
       status: record.status === "validated" ? "pr_opened" : record.status,
@@ -148,7 +177,7 @@ async function restackDescendants(
       await deps.github.editPullRequestBody(
         input.config.repo,
         updatedRecord.pr.number,
-        buildPullRequestBody(updatedRecord, input.trainId),
+        buildPullRequestBody(updatedRecord, input.trainId)
       );
     }
   }
@@ -156,7 +185,11 @@ async function restackDescendants(
   return nextState;
 }
 
-async function cleanupMergedBranches(input: MergeInput, deps: MergeDeps, state: TrainState): Promise<void> {
+async function cleanupMergedBranches(
+  input: MergeInput,
+  deps: MergeDeps,
+  state: TrainState
+): Promise<void> {
   for (const record of Object.values(state.issues)) {
     if (record.status === "merged") {
       await deps.git.deleteRemoteBranch(record.branch);

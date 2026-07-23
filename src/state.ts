@@ -1,12 +1,12 @@
+import { readJson, writeJson } from "./fs.js";
+import type { BranchPlan, IssueGraph } from "./graph.js";
+import { joinPath } from "./path.js";
 import type {
   AgentTrainConfig,
   IssueTrainRecord,
   SyntheticBaseRecord,
   TrainState,
 } from "./types.js";
-import type { BranchPlan, IssueGraph } from "./graph.js";
-import { readJson, writeJson } from "./fs.js";
-import { joinPath } from "./path.js";
 
 export function trainStatePath(cwd: string, trainId: string): string {
   return joinPath(cwd, ".sandcastle", "trains", trainId, "state.json");
@@ -17,7 +17,7 @@ export function createTrainState(
   config: AgentTrainConfig,
   graph: IssueGraph,
   branchPlan: BranchPlan,
-  now = new Date(),
+  now = new Date()
 ): TrainState {
   const timestamp = now.toISOString();
   const issues: Record<string, IssueTrainRecord> = {};
@@ -64,9 +64,15 @@ export function reconcileTrainState(
   config: AgentTrainConfig,
   graph: IssueGraph,
   branchPlan: BranchPlan,
-  now = new Date(),
+  now = new Date()
 ): TrainState {
-  const fresh = createTrainState(existing.trainId, config, graph, branchPlan, now);
+  const fresh = createTrainState(
+    existing.trainId,
+    config,
+    graph,
+    branchPlan,
+    now
+  );
   const issues: Record<string, IssueTrainRecord> = {};
 
   for (const [issueNumber, freshRecord] of Object.entries(fresh.issues)) {
@@ -81,7 +87,9 @@ export function reconcileTrainState(
       branch: oldRecord.pr ? oldRecord.branch : freshRecord.branch,
       baseBranch: oldRecord.pr ? oldRecord.baseBranch : freshRecord.baseBranch,
       blockers: oldRecord.pr ? oldRecord.blockers : freshRecord.blockers,
-      syntheticBase: oldRecord.pr ? oldRecord.syntheticBase : freshRecord.syntheticBase,
+      syntheticBase: oldRecord.pr
+        ? oldRecord.syntheticBase
+        : freshRecord.syntheticBase,
       status: oldRecord.status,
       pr: oldRecord.pr,
       commits: oldRecord.commits,
@@ -92,7 +100,9 @@ export function reconcileTrainState(
   }
 
   const syntheticBases: Record<string, SyntheticBaseRecord> = {};
-  for (const [issueNumber, freshSynthetic] of Object.entries(fresh.syntheticBases)) {
+  for (const [issueNumber, freshSynthetic] of Object.entries(
+    fresh.syntheticBases
+  )) {
     const oldSynthetic = existing.syntheticBases[issueNumber];
     syntheticBases[issueNumber] = oldSynthetic
       ? {
@@ -112,11 +122,17 @@ export function reconcileTrainState(
   };
 }
 
-export async function loadTrainState(cwd: string, trainId: string): Promise<TrainState> {
+export async function loadTrainState(
+  cwd: string,
+  trainId: string
+): Promise<TrainState> {
   return readJson<TrainState>(trainStatePath(cwd, trainId));
 }
 
-export async function saveTrainState(cwd: string, state: TrainState): Promise<void> {
+export async function saveTrainState(
+  cwd: string,
+  state: TrainState
+): Promise<void> {
   await writeJson(trainStatePath(cwd, state.trainId), {
     ...state,
     updatedAt: new Date().toISOString(),
@@ -126,12 +142,14 @@ export async function saveTrainState(cwd: string, state: TrainState): Promise<vo
 export function updateIssueRecord(
   state: TrainState,
   issueNumber: number,
-  update: Partial<IssueTrainRecord>,
+  update: Partial<IssueTrainRecord>
 ): TrainState {
   const key = String(issueNumber);
   const current = state.issues[key];
   if (!current) {
-    throw new Error(`Issue #${issueNumber} is not part of train ${state.trainId}.`);
+    throw new Error(
+      `Issue #${issueNumber} is not part of train ${state.trainId}.`
+    );
   }
 
   return {
@@ -150,7 +168,7 @@ export function updateIssueRecord(
 export function updateSyntheticBase(
   state: TrainState,
   issueNumber: number,
-  update: Partial<SyntheticBaseRecord>,
+  update: Partial<SyntheticBaseRecord>
 ): TrainState {
   const key = String(issueNumber);
   const current = state.syntheticBases[key];
@@ -169,7 +187,10 @@ export function updateSyntheticBase(
   };
 }
 
-export function trainMetadata(record: IssueTrainRecord, trainId: string): string {
+export function trainMetadata(
+  record: IssueTrainRecord,
+  trainId: string
+): string {
   return [
     "<!-- agent-train",
     JSON.stringify({
@@ -185,7 +206,12 @@ export function trainMetadata(record: IssueTrainRecord, trainId: string): string
   ].join("\n");
 }
 
-export function mergeMetadataIntoPrBody(body: string, metadata: string): string {
-  const stripped = body.replace(/<!-- agent-train[\s\S]*?agent-train -->\n?/g, "").trimEnd();
+export function mergeMetadataIntoPrBody(
+  body: string,
+  metadata: string
+): string {
+  const stripped = body
+    .replace(/<!-- agent-train[\s\S]*?agent-train -->\n?/g, "")
+    .trimEnd();
   return `${stripped}\n\n${metadata}\n`;
 }

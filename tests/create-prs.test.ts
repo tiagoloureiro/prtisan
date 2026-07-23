@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { executeCreatePrs } from "../src/commands/create-prs.js";
-import type { AgentRunner } from "../src/agent.js";
-import type { AgentTrainConfig, Issue } from "../src/types.js";
-import type { GitHubClient } from "../src/github.js";
-import type { GitClient } from "../src/git.js";
+
+import type { AgentRunner } from "@/agent.js";
+import { executeCreatePrs } from "@/commands/create-prs.js";
+import type { GitClient } from "@/git.js";
+import type { GitHubClient } from "@/github.js";
+import type { AgentTrainConfig, Issue } from "@/types.js";
+
 import { issue } from "./helpers.js";
 
 const config: AgentTrainConfig = {
@@ -46,7 +48,11 @@ describe("create-prs command", () => {
     const issues: Issue[] = [
       issue({ number: 1, title: "A" }),
       issue({ number: 2, title: "B" }),
-      issue({ number: 3, title: "C", blockedBy: [{ number: 1 }, { number: 2 }] }),
+      issue({
+        number: 3,
+        title: "C",
+        blockedBy: [{ number: 1 }, { number: 2 }],
+      }),
       issue({ number: 4, title: "D", blockedBy: [{ number: 3 }] }),
     ];
     const remoteBranches = new Set<string>(["main"]);
@@ -57,7 +63,10 @@ describe("create-prs command", () => {
       listIssues: async () => issues,
       getRelatedIssues: async () => [],
       createIssueComment: async () => undefined,
-      createOrUpdatePullRequest: async (input: { baseBranch: string; headBranch: string }) => {
+      createOrUpdatePullRequest: async (input: {
+        baseBranch: string;
+        headBranch: string;
+      }) => {
         prCreates.push(input);
         return {
           number: prCreates.length,
@@ -76,9 +85,13 @@ describe("create-prs command", () => {
       pushBranch: async (branch: string) => {
         remoteBranches.add(branch);
       },
-      branchExistsOnRemote: async (branch: string) => remoteBranches.has(branch),
+      branchExistsOnRemote: async (branch: string) =>
+        remoteBranches.has(branch),
       revParseRemoteBranch: async (branch: string) => `sha-for-${branch}`,
-      createSyntheticBaseBranch: async (input: { syntheticBranch: string; blockerBranches: readonly string[] }) => {
+      createSyntheticBaseBranch: async (input: {
+        syntheticBranch: string;
+        blockerBranches: readonly string[];
+      }) => {
         for (const branch of input.blockerBranches) {
           expect(remoteBranches.has(branch)).toBe(true);
         }
@@ -93,8 +106,16 @@ describe("create-prs command", () => {
         commits: [`commit-${input.issue.number}`],
         stdout: "",
       }),
-      reviewPullRequest: async () => ({ axis: "spec", summary: "", findings: [] }),
-      repairPullRequest: async (input) => ({ branch: input.branch, commits: [], stdout: "" }),
+      reviewPullRequest: async () => ({
+        axis: "spec",
+        summary: "",
+        findings: [],
+      }),
+      repairPullRequest: async (input) => ({
+        branch: input.branch,
+        commits: [],
+        stdout: "",
+      }),
     };
 
     const state = await executeCreatePrs(
@@ -107,16 +128,22 @@ describe("create-prs command", () => {
         github,
         git,
         agent,
-      },
+      }
     );
 
     expect(syntheticBases).toEqual(["train/20260723-test/base/3"]);
-    const basesByHead = new Map(prCreates.map((pr) => [pr.headBranch, pr.baseBranch]));
+    const basesByHead = new Map(
+      prCreates.map((pr) => [pr.headBranch, pr.baseBranch])
+    );
     expect(basesByHead.get("agent/issue-1-a")).toBe("main");
     expect(basesByHead.get("agent/issue-2-b")).toBe("main");
-    expect(basesByHead.get("agent/issue-3-c")).toBe("train/20260723-test/base/3");
+    expect(basesByHead.get("agent/issue-3-c")).toBe(
+      "train/20260723-test/base/3"
+    );
     expect(basesByHead.get("agent/issue-4-d")).toBe("agent/issue-3-c");
-    expect(state.issues["3"]?.baseAnchorSha).toBe("sha-for-train/20260723-test/base/3");
+    expect(state.issues["3"]?.baseAnchorSha).toBe(
+      "sha-for-train/20260723-test/base/3"
+    );
     expect(state.issues["4"]?.status).toBe("pr_opened");
   });
 });

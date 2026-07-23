@@ -1,0 +1,8 @@
+node_modules
+dist
+.husky/_
+.agents
+.codex
+.claude
+.sandcastle
+src/vendor

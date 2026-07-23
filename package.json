@@ -4,21 +4,44 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.2.22",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "bin": {
     "agent-train": "./dist/index.js"
   },
   "scripts": {
-    "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external && mkdir -p dist/vendor && cp -R src/vendor/code-review dist/vendor/",
+    "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external && chmod +x dist/index.js && mkdir -p dist/vendor && cp -R src/vendor/code-review dist/vendor/",
     "dev": "bun run src/index.ts",
+    "agent-train": "bun run src/index.ts",
+    "link-bin": "bun run build && bun link --global",
+    "release:pack": "mkdir -p release && rm -f release/*.tgz release/SHA256SUMS && bun run build && bun pm pack --destination release && sha256sum release/*.tgz > release/SHA256SUMS",
+    "init": "bun run src/index.ts init",
+    "create-prs": "bun run src/index.ts create-prs",
+    "validate": "bun run src/index.ts validate",
+    "merge": "bun run src/index.ts merge",
+    "lint": "eslint .",
+    "format": "prettier --ignore-unknown --write .",
+    "format:check": "prettier --ignore-unknown --check .",
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "prepare": "husky"
   },
   "dependencies": {
     "@ai-hero/sandcastle": "^0.12.0",
     "zod": "^4.1.13"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/bun": "^1.2.22",
-    "typescript": "^5.9.3"
+    "bun": "1.2.22",
+    "eslint": "^10.7.0",
+    "eslint-plugin-simple-import-sort": "^14.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.2.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0"
   }
 }

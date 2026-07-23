@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+
+import { buildIssueGraph, descendantsOf, planBranches } from "@/graph.js";
+import type { AgentTrainConfig } from "@/types.js";
+
 import { issue } from "./helpers.js";
-import { buildIssueGraph, descendantsOf, planBranches } from "../src/graph.js";
-import type { AgentTrainConfig } from "../src/types.js";
 
 const config: AgentTrainConfig = {
   repo: "o/r",
@@ -71,7 +73,10 @@ describe("issue graph", () => {
       issue({
         number: 2,
         title: "active",
-        blockedBy: [{ number: 1, state: "CLOSED" }, { number: 99, state: "OPEN" }],
+        blockedBy: [
+          { number: 1, state: "CLOSED" },
+          { number: 99, state: "OPEN" },
+        ],
       }),
     ]);
 
@@ -85,7 +90,7 @@ describe("issue graph", () => {
       buildIssueGraph([
         issue({ number: 1, title: "A", blockedBy: [{ number: 2 }] }),
         issue({ number: 2, title: "B", blockedBy: [{ number: 1 }] }),
-      ]),
+      ])
     ).toThrow(/cycle/i);
   });
 
@@ -93,7 +98,11 @@ describe("issue graph", () => {
     const graph = buildIssueGraph([
       issue({ number: 1, title: "API" }),
       issue({ number: 2, title: "UI" }),
-      issue({ number: 3, title: "Wire it", blockedBy: [{ number: 1 }, { number: 2 }] }),
+      issue({
+        number: 3,
+        title: "Wire it",
+        blockedBy: [{ number: 1 }, { number: 2 }],
+      }),
     ]);
     const plan = planBranches(graph, config, "20260723-test");
 

@@ -13,7 +13,11 @@ export interface CommandOptions {
 }
 
 export interface CommandRunner {
-  run(command: string, args?: readonly string[], options?: CommandOptions): Promise<CommandResult>;
+  run(
+    command: string,
+    args?: readonly string[],
+    options?: CommandOptions
+  ): Promise<CommandResult>;
 }
 
 export class CommandError extends Error {
@@ -21,7 +25,7 @@ export class CommandError extends Error {
 
   constructor(result: CommandResult) {
     super(
-      `${result.command.join(" ")} failed with exit code ${result.exitCode}\n${result.stderr || result.stdout}`,
+      `${result.command.join(" ")} failed with exit code ${result.exitCode}\n${result.stderr || result.stdout}`
     );
     this.name = "CommandError";
     this.result = result;
@@ -32,7 +36,7 @@ export class BunCommandRunner implements CommandRunner {
   async run(
     command: string,
     args: readonly string[] = [],
-    options: CommandOptions = {},
+    options: CommandOptions = {}
   ): Promise<CommandResult> {
     const proc = Bun.spawn([command, ...args], {
       cwd: options.cwd,
@@ -43,8 +47,12 @@ export class BunCommandRunner implements CommandRunner {
     });
 
     if (options.input !== undefined) {
-      proc.stdin.write(options.input);
-      proc.stdin.end();
+      const stdin = proc.stdin;
+      if (!stdin) {
+        throw new Error("Expected a writable stdin pipe for command input.");
+      }
+      stdin.write(options.input);
+      stdin.end();
     }
 
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -67,7 +75,7 @@ export async function mustRun(
   runner: CommandRunner,
   command: string,
   args: readonly string[] = [],
-  options: CommandOptions = {},
+  options: CommandOptions = {}
 ): Promise<CommandResult> {
   const result = await runner.run(command, args, options);
   if (result.exitCode !== 0) {
@@ -80,7 +88,7 @@ export async function runJson<T>(
   runner: CommandRunner,
   command: string,
   args: readonly string[] = [],
-  options: CommandOptions = {},
+  options: CommandOptions = {}
 ): Promise<T> {
   const result = await mustRun(runner, command, args, options);
   return JSON.parse(result.stdout) as T;

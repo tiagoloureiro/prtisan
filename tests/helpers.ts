@@ -1,7 +1,9 @@
-import type { CommandOptions, CommandResult, CommandRunner } from "../src/exec.js";
-import type { Issue } from "../src/types.js";
+import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
+import type { Issue } from "@/types.js";
 
-export function issue(input: Partial<Issue> & Pick<Issue, "number" | "title">): Issue {
+export function issue(
+  input: Partial<Issue> & Pick<Issue, "number" | "title">
+): Issue {
   return {
     body: "",
     state: "OPEN",
@@ -31,7 +33,11 @@ export class FakeRunner implements CommandRunner {
     });
   }
 
-  async run(command: string, args: readonly string[] = [], options?: CommandOptions): Promise<CommandResult> {
+  async run(
+    command: string,
+    args: readonly string[] = [],
+    options?: CommandOptions
+  ): Promise<CommandResult> {
     this.calls.push({ command, args, options });
     const response = this.responses.shift() ?? {
       command: [command, ...args],

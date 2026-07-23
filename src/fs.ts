@@ -20,7 +20,9 @@ export async function ensureDir(path: string): Promise<void> {
   ]);
 
   if (exitCode !== 0) {
-    throw new Error(`mkdir -p ${path} failed (${exitCode}): ${stderr || stdout}`);
+    throw new Error(
+      `mkdir -p ${path} failed (${exitCode}): ${stderr || stdout}`
+    );
   }
 }
 

@@ -1,5 +1,5 @@
-import type { AgentTrainConfig, Issue } from "./types.js";
 import { issueBranch, syntheticBaseBranch } from "./branching.js";
+import type { AgentTrainConfig, Issue } from "./types.js";
 
 export interface IssueGraphNode {
   readonly issue: Issue;
@@ -31,7 +31,9 @@ export class IssueGraphCycleError extends Error {
   readonly cycle: readonly number[];
 
   constructor(cycle: readonly number[]) {
-    super(`Issue dependency graph contains a cycle: ${cycle.map((n) => `#${n}`).join(" -> ")}`);
+    super(
+      `Issue dependency graph contains a cycle: ${cycle.map((n) => `#${n}`).join(" -> ")}`
+    );
     this.name = "IssueGraphCycleError";
     this.cycle = cycle;
   }
@@ -69,7 +71,7 @@ export function buildIssueGraph(issues: readonly Issue[]): IssueGraph {
       blocking: uniqueSortedNumbers(
         issue.blocking
           .map((blocked) => blocked.number)
-          .filter((number) => issueMap.has(number)),
+          .filter((number) => issueMap.has(number))
       ),
     });
   }
@@ -80,7 +82,10 @@ export function buildIssueGraph(issues: readonly Issue[]): IssueGraph {
       if (!blockerNode) continue;
       nodes.set(blocker, {
         ...blockerNode,
-        blocking: uniqueSortedNumbers([...blockerNode.blocking, node.issue.number]),
+        blocking: uniqueSortedNumbers([
+          ...blockerNode.blocking,
+          node.issue.number,
+        ]),
       });
     }
   }
@@ -101,7 +106,7 @@ export function buildIssueGraph(issues: readonly Issue[]): IssueGraph {
 export function planBranches(
   graph: IssueGraph,
   config: AgentTrainConfig,
-  trainId: string,
+  trainId: string
 ): BranchPlan {
   const issues = new Map<number, PlannedIssueBranch>();
 
@@ -111,7 +116,9 @@ export function planBranches(
 
     const blockers = node.blockers;
     const syntheticBase =
-      blockers.length > 1 ? syntheticBaseBranch(config, trainId, issueNumber) : undefined;
+      blockers.length > 1
+        ? syntheticBaseBranch(config, trainId, issueNumber)
+        : undefined;
     const baseBranch =
       blockers.length === 0
         ? config.targetBranch
@@ -131,7 +138,10 @@ export function planBranches(
   return { issues };
 }
 
-export function descendantsOf(graph: IssueGraph, issueNumber: number): number[] {
+export function descendantsOf(
+  graph: IssueGraph,
+  issueNumber: number
+): number[] {
   const descendants = new Set<number>();
   const queue = [...(graph.nodes.get(issueNumber)?.blocking ?? [])];
 
@@ -142,10 +152,15 @@ export function descendantsOf(graph: IssueGraph, issueNumber: number): number[] 
     queue.push(...(graph.nodes.get(current)?.blocking ?? []));
   }
 
-  return [...descendants].sort((a, b) => graph.topologicalOrder.indexOf(a) - graph.topologicalOrder.indexOf(b));
+  return [...descendants].sort(
+    (a, b) =>
+      graph.topologicalOrder.indexOf(a) - graph.topologicalOrder.indexOf(b)
+  );
 }
 
-function topologicalLayers(nodes: ReadonlyMap<number, IssueGraphNode>): number[][] {
+function topologicalLayers(
+  nodes: ReadonlyMap<number, IssueGraphNode>
+): number[][] {
   const remaining = new Set(nodes.keys());
   const layers: number[][] = [];
 
@@ -153,7 +168,9 @@ function topologicalLayers(nodes: ReadonlyMap<number, IssueGraphNode>): number[]
     const layer = [...remaining]
       .filter((issueNumber) => {
         const node = nodes.get(issueNumber);
-        return node ? node.blockers.every((blocker) => !remaining.has(blocker)) : false;
+        return node
+          ? node.blockers.every((blocker) => !remaining.has(blocker))
+          : false;
       })
       .sort((a, b) => a - b);
 
@@ -170,7 +187,9 @@ function topologicalLayers(nodes: ReadonlyMap<number, IssueGraphNode>): number[]
   return layers;
 }
 
-function findCycle(nodes: ReadonlyMap<number, IssueGraphNode>): number[] | undefined {
+function findCycle(
+  nodes: ReadonlyMap<number, IssueGraphNode>
+): number[] | undefined {
   const visiting = new Set<number>();
   const visited = new Set<number>();
   const stack: number[] = [];
