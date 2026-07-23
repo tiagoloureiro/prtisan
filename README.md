@@ -34,4 +34,3 @@ bun install
 bun run typecheck
 bun test
 ```
-# prtisan

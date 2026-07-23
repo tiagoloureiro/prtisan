@@ -1,0 +1,17 @@
+# ADR 0005: Squash Merge the PR Train
+
+## Status
+
+Accepted
+
+## Context
+
+The desired repository history is one main-branch commit per issue, but stacked branches normally preserve ancestry through merge commits.
+
+## Decision
+
+Use green-only squash merges with head-SHA guards, then restack affected descendant branches and rerun validation.
+
+## Consequences
+
+The merge train is slower than a merge-commit train because descendants must be rebased or regenerated after each parent lands. It produces a cleaner main history and stops instead of bypassing branch protection.

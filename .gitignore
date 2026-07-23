@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+.sandcastle/.env
+.sandcastle/codex-home/
+.sandcastle/trains/
+.sandcastle/worktrees/
+.sandcastle/logs/
+.sandcastle/patches/

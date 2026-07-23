@@ -1,0 +1,10 @@
+node_modules
+dist
+.git
+.sandcastle/trains
+.sandcastle/codex-home
+.sandcastle/worktrees
+.sandcastle/logs
+.sandcastle/patches
+coverage
+*.log

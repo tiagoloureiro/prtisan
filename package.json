@@ -1,0 +1,24 @@
+{
+  "name": "agent-train",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.2.22",
+  "bin": {
+    "agent-train": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external && mkdir -p dist/vendor && cp -R src/vendor/code-review dist/vendor/",
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.22",
+    "typescript": "^5.9.3"
+  }
+}
