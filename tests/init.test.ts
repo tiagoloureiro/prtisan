@@ -50,6 +50,8 @@ describe("init command", () => {
     runner.enqueue("");
     runner.enqueue("");
     runner.enqueue("");
+    runner.enqueue("");
+    runner.enqueue("");
     runner.enqueue("[]");
     runner.enqueue("https://github.com/o/r/issues/7\n");
     runner.enqueue("");

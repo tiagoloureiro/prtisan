@@ -20,13 +20,14 @@ const DEFAULT_CONCURRENCY = {
 const DEFAULT_DOCKER = {
   imageName: "sandcastle:agent-train",
   codexHome: ".sandcastle/codex-home",
+  cpus: 2,
   mounts: [],
-};
+} satisfies AgentTrainConfig["docker"];
 const DEFAULT_RETENTION = {
   ttlDays: 14,
   maxLogBytes: 10 * 1024 * 1024,
   keepSessions: true,
-};
+} satisfies AgentTrainConfig["retention"];
 
 const ConfigSchema = z.object({
   repo: z.string().min(1),
@@ -94,6 +95,25 @@ export const DEFAULT_CONFIG_PATH = ".sandcastle/agent-train.config.json";
 export interface ConfigOverrides {
   readonly repo?: string;
   readonly targetBranch?: string;
+}
+
+export function defaultConfig(input: {
+  readonly repo: string;
+  readonly targetBranch: string;
+}): AgentTrainConfig {
+  return {
+    repo: input.repo,
+    targetBranch: input.targetBranch,
+    remote: "origin",
+    models: { ...DEFAULT_MODELS },
+    reasoning: { ...DEFAULT_REASONING },
+    concurrency: { ...DEFAULT_CONCURRENCY },
+    docker: {
+      ...DEFAULT_DOCKER,
+      mounts: [...DEFAULT_DOCKER.mounts],
+    },
+    retention: { ...DEFAULT_RETENTION },
+  };
 }
 
 export async function loadConfig(

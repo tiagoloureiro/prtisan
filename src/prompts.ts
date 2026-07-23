@@ -1,4 +1,9 @@
-import type { Issue, ReviewAxis, ReviewFinding } from "./types.js";
+import type {
+  Issue,
+  PullRequestCheckEvidence,
+  ReviewAxis,
+  ReviewFinding,
+} from "./types.js";
 
 export interface ReviewPromptInput {
   readonly axis: ReviewAxis;
@@ -16,6 +21,25 @@ export interface RepairPromptInput {
   readonly findings: readonly ReviewFinding[];
   readonly prNumber: number;
   readonly branch: string;
+}
+
+export interface CiRepairPromptInput {
+  readonly issue?: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly checkEvidence: readonly PullRequestCheckEvidence[];
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+}
+
+export interface MergeStateRepairPromptInput {
+  readonly issue?: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly blockers: readonly string[];
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly mergeState: string;
 }
 
 export interface IssueBranchReviewPromptInput {
@@ -150,6 +174,49 @@ export function buildRepairPrompt(input: RepairPromptInput): string {
       null,
       2
     ),
+  ].join("\n");
+}
+
+export function buildCiRepairPrompt(input: CiRepairPromptInput): string {
+  return [
+    `You are repairing branch ${input.branch} for PR #${input.prNumber} because GitHub checks failed.`,
+    `Base branch: ${input.baseBranch}.`,
+    "",
+    "Use the failed check evidence below as the primary diagnosis input.",
+    "Fix only clear causes of the failing checks.",
+    "Do not make product scope changes unless they are required by the failing checks or the linked issue.",
+    "Run focused verification and commit the repair to the current branch.",
+    "When finished, output <promise>COMPLETE</promise>.",
+    "",
+    input.issue
+      ? issueBlock("Primary issue", input.issue)
+      : "Primary issue: none linked. Do not infer product requirements beyond the check failures.",
+    relatedIssuesBlock(input.relatedIssues),
+    "",
+    "Failed check evidence:",
+    JSON.stringify(input.checkEvidence, null, 2),
+  ].join("\n");
+}
+
+export function buildMergeStateRepairPrompt(
+  input: MergeStateRepairPromptInput
+): string {
+  return [
+    `You are repairing branch ${input.branch} for PR #${input.prNumber} because GitHub reports merge state ${input.mergeState}.`,
+    `Base branch: ${input.baseBranch}.`,
+    "",
+    "Fix only concrete mergeability blockers listed below.",
+    "Do not attempt to satisfy required human review with code changes.",
+    "Run focused verification and commit the repair to the current branch.",
+    "When finished, output <promise>COMPLETE</promise>.",
+    "",
+    input.issue
+      ? issueBlock("Primary issue", input.issue)
+      : "Primary issue: none linked. Do not infer product requirements beyond the mergeability blockers.",
+    relatedIssuesBlock(input.relatedIssues),
+    "",
+    "Mergeability blockers:",
+    JSON.stringify(input.blockers, null, 2),
   ].join("\n");
 }
 

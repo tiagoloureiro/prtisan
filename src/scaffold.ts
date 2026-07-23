@@ -1,6 +1,6 @@
+import { DEFAULT_CONFIG_PATH, defaultConfig } from "./config.js";
 import { pathExists, readText, writeText } from "./fs.js";
 import { joinPath } from "./path.js";
-import type { AgentTrainConfig } from "./types.js";
 
 export interface ScaffoldOptions {
   readonly repo: string;
@@ -26,46 +26,12 @@ const GITIGNORE_RULES = [
   ".sandcastle/patches/",
 ];
 
-export function defaultScaffoldConfig(input: {
-  readonly repo: string;
-  readonly targetBranch: string;
-}): AgentTrainConfig {
-  return {
-    repo: input.repo,
-    targetBranch: input.targetBranch,
-    remote: "origin",
-    models: {
-      repair: "gpt-5.6-terra",
-      review: "gpt-5.6-luna",
-    },
-    reasoning: {
-      repair: "medium",
-      review: "low",
-    },
-    concurrency: {
-      validate: 4,
-      github: 4,
-    },
-    docker: {
-      imageName: "sandcastle:agent-train",
-      codexHome: ".sandcastle/codex-home",
-      cpus: 2,
-      mounts: [],
-    },
-    retention: {
-      ttlDays: 14,
-      maxLogBytes: 10 * 1024 * 1024,
-      keepSessions: true,
-    },
-  };
-}
-
 export async function writeScaffoldFiles(
   root: string,
   options: ScaffoldOptions
 ): Promise<ScaffoldResult> {
   const files: ScaffoldFileResult[] = [];
-  const config = defaultScaffoldConfig({
+  const config = defaultConfig({
     repo: options.repo,
     targetBranch: options.targetBranch,
   });
@@ -73,7 +39,7 @@ export async function writeScaffoldFiles(
   files.push(
     await writeManagedFile(
       root,
-      ".sandcastle/agent-train.config.json",
+      DEFAULT_CONFIG_PATH,
       `${JSON.stringify(config, null, 2)}\n`,
       options
     )

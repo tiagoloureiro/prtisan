@@ -506,7 +506,10 @@ agent-train init --cwd /path/to/repo</code></pre>
               relationships.
             </li>
             <li>Branch relationships are also part of the dependency graph.</li>
-            <li>Draft PRs stay in the graph, but merge stops before them.</li>
+            <li>
+              Draft PRs stay in the graph, and merge marks each draft PR ready
+              when it reaches that PR.
+            </li>
             <li>PRs without closing issues receive Standards review only.</li>
           </ul>
         </section>
@@ -519,7 +522,7 @@ agent-train init --cwd /path/to/repo</code></pre>
             dependencies, runs Standards review for every selected PR, and runs
             Spec review when a closing issue is present. By default it repairs
             blocking PR findings when possible and posts a GitHub PR review with
-            the validation marker.
+            a validation marker tied to the current PR head SHA.
           </p>
           <p>
             It also checks open issues against the target branch, comments with
@@ -535,9 +538,12 @@ agent-train init --cwd /path/to/repo</code></pre>
           <pre><code>agent-train merge --cwd /path/to/repo --repo OWNER/REPO</code></pre>
           <p>
             <code>merge</code> reloads open pull requests, processes them in
-            topological order, and stops before draft, not-ready, missing-green,
-            or blocking-validation PRs. Ready PRs are squash-merged with a
-            head-SHA guard.
+            topological order, marks draft PRs ready when it reaches them, and
+            validates or revalidates the current PR when needed, attempts CI and
+            merge-state repair, and stops only when a blocker remains after
+            repair or required human review is missing. Ready PRs are
+            squash-merged only after GitHub is green/mergeable with a head-SHA
+            guard.
           </p>
           <p>
             After each squash merge, affected descendants are restacked and

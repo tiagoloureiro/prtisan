@@ -66,7 +66,7 @@ If the config still contains `OWNER/REPO`, update it before running validation o
 - Issue bodies should contain enough acceptance criteria for an agent to decide whether the target branch or PR satisfies the spec.
 - Use GitHub native issue dependencies for blocked-by and blocking relationships.
 - Branch relationships are also part of the dependency graph: a PR based on another open PR branch depends on that PR.
-- Draft PRs stay in the graph, but `merge` stops before merging draft, not-ready, or blocking-validation PRs.
+- Draft PRs stay in the graph, and `merge` marks each draft PR ready when it reaches that PR in topological order.
 - PRs without linked closing issues still receive a Standards review; Spec review is skipped because there is no authoritative issue text.
 
 ## Validate
@@ -79,7 +79,7 @@ agent-train validate --cwd /path/to/repo --repo OWNER/REPO
 
 `validate` loads all open pull requests, including drafts. It derives dependencies from PR base/head branch relationships, then enriches that graph with linked issue dependencies. For every selected PR it runs a Standards review, and when a closing issue is present it also runs a Spec review against the issue and directly related issues.
 
-By default, validation repairs blocking PR findings when possible and posts a GitHub PR review with the validation marker. It also checks open issues against the target branch, comments with the result, and can create or update an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and there is no associated open PR.
+By default, validation repairs blocking PR findings when possible and posts a GitHub PR review with a validation marker tied to the current PR head SHA. It also checks open issues against the target branch, comments with the result, and can create or update an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and there is no associated open PR.
 
 Use `--no-repair` when validation should report findings without letting repair agents commit changes.
 
@@ -91,7 +91,7 @@ Run:
 agent-train merge --cwd /path/to/repo --repo OWNER/REPO
 ```
 
-`merge` reloads open pull requests from GitHub, processes them in topological order, and stops before a PR that is draft, not ready, missing green checks, or blocked by a validation review. Ready PRs are squash-merged with a head-SHA guard so the command does not merge a branch that changed underneath it.
+`merge` reloads open pull requests from GitHub, processes them in topological order, marks draft PRs ready when it reaches them, validates or revalidates the current PR when needed, attempts CI and merge-state repair, and stops only when a blocker remains after repair or required human review is missing. Ready PRs are squash-merged only after GitHub is green/mergeable with a head-SHA guard so the command does not merge a branch that changed underneath it.
 
 After each squash merge, affected descendants are restacked and validation is rerun for the impacted part of the train. For PRs that depend on multiple blockers, Agent PR Train may create synthetic base branches so GitHub's single-base-branch PR model can still represent a DAG-shaped dependency graph.
 

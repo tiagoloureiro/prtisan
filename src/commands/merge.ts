@@ -1,13 +1,11 @@
-import { runIdFromDate, syntheticBaseBranch } from "@/branching.js";
+import type { AgentRunner } from "@/agent.js";
+import { runIdFromDate } from "@/branching.js";
 import { GitClient } from "@/git.js";
-import { GitHubClient, pullRequestReadinessBlockers } from "@/github.js";
-import {
-  descendantsOfOpenPr,
-  loadOpenPrGraph,
-  type OpenPrGraph,
-  type OpenPrNode,
-} from "@/open-pr-graph.js";
-import type { AgentTrainConfig, PullRequest } from "@/types.js";
+import { GitHubClient } from "@/github.js";
+import { preparePullRequestForMerge } from "@/merge-readiness.js";
+import { loadOpenPrGraph, type OpenPrGraph } from "@/open-pr-graph.js";
+import { restackAfterMerge } from "@/train-restacker.js";
+import type { AgentTrainConfig } from "@/types.js";
 
 export interface MergeInput {
   readonly cwd: string;
@@ -19,6 +17,7 @@ export interface MergeInput {
 export interface MergeDeps {
   readonly github: GitHubClient;
   readonly git: GitClient;
+  readonly agent?: AgentRunner;
   readonly validatePullRequests?: (
     pullNumbers: readonly number[]
   ) => Promise<void>;
@@ -45,12 +44,22 @@ export async function executeMerge(
   const merged: MergedPullRequest[] = [];
   let graph = await loadCurrentGraph(input, deps);
 
-  while (graph.topologicalOrder.length > 0) {
-    const prNumber = graph.topologicalOrder[0] as number;
-    const node = graph.nodes.get(prNumber);
-    if (!node) break;
+  while (true) {
+    if (graph.topologicalOrder.length === 0) break;
 
-    assertReadyToMerge(node);
+    const prNumber = graph.topologicalOrder[0] as number;
+    const ready = await preparePullRequestForMerge(
+      {
+        cwd: input.cwd,
+        config: input.config,
+        graph,
+        prNumber,
+        runId,
+      },
+      deps
+    );
+    graph = ready.graph;
+    const node = ready.node;
 
     deps.log?.(`Squash-merging PR #${node.pr.number}`);
     await deps.github.mergePullRequest(
@@ -70,25 +79,23 @@ export async function executeMerge(
       headRefOid: mergedPr.headRefOid,
     });
 
-    const affectedFromPreviousGraph = descendantsOfOpenPr(
-      graph,
-      node.pr.number
+    const restacked = await restackAfterMerge(
+      {
+        cwd: input.cwd,
+        config: input.config,
+        previousGraph: graph,
+        mergedPrNumber: node.pr.number,
+        runId,
+      },
+      deps
     );
-    graph = await loadCurrentGraph(input, deps);
-    const affected = affectedFromPreviousGraph.filter((affectedPr) =>
-      graph.nodes.has(affectedPr)
-    );
-
-    if (affected.length > 0) {
-      await restackDescendants(input, deps, graph, affected, runId);
+    if (restacked.affected.length > 0) {
       if (input.validateAffected ?? true) {
-        await deps.validatePullRequests?.(affected);
+        await deps.validatePullRequests?.(restacked.affected);
       }
     }
 
     await deps.git.deleteRemoteBranch(node.pr.headRefName);
-    await deps.git.deleteRemoteBranch(syntheticBaseBranch(node.pr.number));
-    await cleanupObsoleteSyntheticBranches(input, deps);
     graph = await loadCurrentGraph(input, deps);
   }
 
@@ -108,109 +115,4 @@ async function loadCurrentGraph(
     targetBranch: input.config.targetBranch,
     concurrency: input.config.concurrency.github,
   });
-}
-
-function assertReadyToMerge(node: OpenPrNode): void {
-  const blockers: string[] = [];
-  const validation = node.validation;
-  if (validation.state === "missing") {
-    blockers.push(
-      `PR #${node.pr.number} has no agent-train validation review yet.`
-    );
-  }
-  if (validation.state === "blocked") {
-    blockers.push(
-      `PR #${node.pr.number} has ${validation.blockingFindings} blocking agent validation finding(s).`
-    );
-  }
-
-  blockers.push(...pullRequestReadinessBlockers(node.pr));
-
-  if (blockers.length === 1) {
-    throw new Error(blockers[0] as string);
-  }
-  if (blockers.length > 1) {
-    throw new Error(
-      [
-        `PR #${node.pr.number} is not ready to merge:`,
-        ...blockers.map((blocker) => `- ${blocker}`),
-      ].join("\n")
-    );
-  }
-}
-
-async function restackDescendants(
-  input: MergeInput,
-  deps: MergeDeps,
-  graph: OpenPrGraph,
-  affected: readonly number[],
-  runId: string
-): Promise<void> {
-  const affectedSet = new Set(affected);
-  const ordered = graph.topologicalOrder
-    .map((prNumber) => graph.nodes.get(prNumber))
-    .filter((node): node is OpenPrNode =>
-      Boolean(node && affectedSet.has(node.pr.number))
-    );
-
-  for (const node of ordered) {
-    const openBlockerBranches = node.blockers
-      .map((blocker) => graph.nodes.get(blocker)?.pr.headRefName)
-      .filter((branch): branch is string => Boolean(branch));
-    const nextBase = nextBaseBranch(input.config, node.pr, openBlockerBranches);
-
-    if (openBlockerBranches.length > 1) {
-      await deps.git.createSyntheticBaseBranch({
-        runId,
-        label: `base-pr-${node.pr.number}`,
-        syntheticBranch: nextBase,
-        blockerBranches: openBlockerBranches,
-      });
-    }
-
-    const nextBaseAnchorSha = await deps.git.rebaseBranchOntoBase({
-      runId,
-      label: `restack-pr-${node.pr.number}`,
-      branch: node.pr.headRefName,
-      baseBranch: nextBase,
-      oldBaseAnchorSha: node.pr.baseRefOid || undefined,
-    });
-
-    if (node.pr.baseRefName !== nextBase) {
-      await deps.github.editPullRequestBase(
-        input.config.repo,
-        node.pr.number,
-        nextBase
-      );
-      deps.log?.(
-        `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${nextBase} at ${nextBaseAnchorSha}`
-      );
-    }
-  }
-}
-
-function nextBaseBranch(
-  config: AgentTrainConfig,
-  pr: PullRequest,
-  openBlockerBranches: readonly string[]
-): string {
-  if (openBlockerBranches.length === 0) return config.targetBranch;
-  if (openBlockerBranches.length === 1) return openBlockerBranches[0] as string;
-  return syntheticBaseBranch(pr.number);
-}
-
-async function cleanupObsoleteSyntheticBranches(
-  input: MergeInput,
-  deps: MergeDeps
-): Promise<void> {
-  const graph = await loadCurrentGraph(input, deps);
-  const liveBases = new Set(
-    [...graph.nodes.values()].map((node) => node.pr.baseRefName)
-  );
-  for (const node of graph.nodes.values()) {
-    const synthetic = syntheticBaseBranch(node.pr.number);
-    if (!liveBases.has(synthetic)) {
-      await deps.git.deleteRemoteBranch(synthetic);
-    }
-  }
 }

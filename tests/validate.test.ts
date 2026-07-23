@@ -343,27 +343,32 @@ function fakeAgent(
     readonly issueBranchFindings?: readonly ReviewFinding[];
     readonly repairIssueCommits?: readonly string[];
     readonly onReviewPullRequest?: (
-      input: Parameters<AgentRunner["reviewPullRequest"]>[0]
+      input: Extract<
+        Parameters<AgentRunner["review"]>[0],
+        { kind: "pull-request" }
+      >
     ) => void;
     readonly onReviewIssueBranch?: (
-      input: Parameters<AgentRunner["reviewIssueBranch"]>[0]
+      input: Extract<
+        Parameters<AgentRunner["review"]>[0],
+        { kind: "issue-branch" }
+      >
     ) => void;
     readonly onRepairIssueBranch?: (
-      input: Parameters<AgentRunner["repairIssueBranch"]>[0]
+      input: Extract<
+        Parameters<AgentRunner["repair"]>[0],
+        { kind: "issue-branch" }
+      >
     ) => void;
   } = {}
 ): AgentRunner {
   return {
-    reviewPullRequest: async (input) => {
-      options.onReviewPullRequest?.(input);
-      return { axis: input.axis, summary: "", findings: [] };
-    },
-    repairPullRequest: async (input) => ({
-      branch: input.branch,
-      commits: [],
-      stdout: "",
-    }),
-    reviewIssueBranch: async (input) => {
+    review: async (input) => {
+      if (input.kind === "pull-request") {
+        options.onReviewPullRequest?.(input);
+        return { axis: input.axis, summary: "", findings: [] };
+      }
+
       options.onReviewIssueBranch?.(input);
       return {
         axis: "spec",
@@ -371,11 +376,19 @@ function fakeAgent(
         findings: options.issueBranchFindings ?? [],
       };
     },
-    repairIssueBranch: async (input) => {
-      options.onRepairIssueBranch?.(input);
+    repair: async (input) => {
+      if (input.kind === "issue-branch") {
+        options.onRepairIssueBranch?.(input);
+        return {
+          branch: input.branch,
+          commits: options.repairIssueCommits ?? [],
+          stdout: "",
+        };
+      }
+
       return {
         branch: input.branch,
-        commits: options.repairIssueCommits ?? [],
+        commits: [],
         stdout: "",
       };
     },

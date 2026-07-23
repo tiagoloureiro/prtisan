@@ -1,0 +1,142 @@
+import { syntheticBaseBranch } from "./branching.js";
+import type { GitClient } from "./git.js";
+import type { GitHubClient } from "./github.js";
+import {
+  descendantsOfOpenPr,
+  loadOpenPrGraph,
+  type OpenPrGraph,
+  type OpenPrNode,
+} from "./open-pr-graph.js";
+import type { AgentTrainConfig, PullRequest } from "./types.js";
+
+export interface TrainRestackInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly previousGraph: OpenPrGraph;
+  readonly mergedPrNumber: number;
+  readonly runId: string;
+}
+
+export interface TrainRestackDeps {
+  readonly github: GitHubClient;
+  readonly git: GitClient;
+  readonly log?: (message: string) => void;
+}
+
+export interface TrainRestackResult {
+  readonly graph: OpenPrGraph;
+  readonly affected: readonly number[];
+}
+
+export async function restackAfterMerge(
+  input: TrainRestackInput,
+  deps: TrainRestackDeps
+): Promise<TrainRestackResult> {
+  const affectedFromPreviousGraph = descendantsOfOpenPr(
+    input.previousGraph,
+    input.mergedPrNumber
+  );
+  const graph = await loadCurrentGraph(input, deps);
+  const affected = affectedFromPreviousGraph.filter((affectedPr) =>
+    graph.nodes.has(affectedPr)
+  );
+
+  if (affected.length > 0) {
+    await restackDescendants(input, deps, graph, affected);
+  }
+
+  await deps.git.deleteRemoteBranch(syntheticBaseBranch(input.mergedPrNumber));
+  await cleanupObsoleteSyntheticBranches(input, deps);
+
+  return {
+    graph,
+    affected,
+  };
+}
+
+async function restackDescendants(
+  input: TrainRestackInput,
+  deps: TrainRestackDeps,
+  graph: OpenPrGraph,
+  affected: readonly number[]
+): Promise<void> {
+  const affectedSet = new Set(affected);
+  const ordered = graph.topologicalOrder
+    .map((prNumber) => graph.nodes.get(prNumber))
+    .filter((node): node is OpenPrNode =>
+      Boolean(node && affectedSet.has(node.pr.number))
+    );
+
+  for (const node of ordered) {
+    const openBlockerBranches = node.blockers
+      .map((blocker) => graph.nodes.get(blocker)?.pr.headRefName)
+      .filter((branch): branch is string => Boolean(branch));
+    const nextBase = nextBaseBranch(input.config, node.pr, openBlockerBranches);
+
+    if (openBlockerBranches.length > 1) {
+      await deps.git.createSyntheticBaseBranch({
+        runId: input.runId,
+        label: `base-pr-${node.pr.number}`,
+        syntheticBranch: nextBase,
+        blockerBranches: openBlockerBranches,
+      });
+    }
+
+    const nextBaseAnchorSha = await deps.git.rebaseBranchOntoBase({
+      runId: input.runId,
+      label: `restack-pr-${node.pr.number}`,
+      branch: node.pr.headRefName,
+      baseBranch: nextBase,
+      oldBaseAnchorSha: node.pr.baseRefOid || undefined,
+    });
+
+    if (node.pr.baseRefName !== nextBase) {
+      await deps.github.editPullRequestBase(
+        input.config.repo,
+        node.pr.number,
+        nextBase
+      );
+      deps.log?.(
+        `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${nextBase} at ${nextBaseAnchorSha}`
+      );
+    }
+  }
+}
+
+function nextBaseBranch(
+  config: AgentTrainConfig,
+  pr: PullRequest,
+  openBlockerBranches: readonly string[]
+): string {
+  if (openBlockerBranches.length === 0) return config.targetBranch;
+  if (openBlockerBranches.length === 1) return openBlockerBranches[0] as string;
+  return syntheticBaseBranch(pr.number);
+}
+
+async function cleanupObsoleteSyntheticBranches(
+  input: Pick<TrainRestackInput, "config">,
+  deps: TrainRestackDeps
+): Promise<void> {
+  const graph = await loadCurrentGraph(input, deps);
+  const liveBases = new Set(
+    [...graph.nodes.values()].map((node) => node.pr.baseRefName)
+  );
+  for (const node of graph.nodes.values()) {
+    const synthetic = syntheticBaseBranch(node.pr.number);
+    if (!liveBases.has(synthetic)) {
+      await deps.git.deleteRemoteBranch(synthetic);
+    }
+  }
+}
+
+async function loadCurrentGraph(
+  input: Pick<TrainRestackInput, "config">,
+  deps: Pick<TrainRestackDeps, "github">
+): Promise<OpenPrGraph> {
+  return loadOpenPrGraph({
+    github: deps.github,
+    repo: input.config.repo,
+    targetBranch: input.config.targetBranch,
+    concurrency: input.config.concurrency.github,
+  });
+}

@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import { BunCommandRunner } from "./exec.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
-import { assertPreflight } from "./preflight.js";
+import { assertRuntimeReady } from "./preflight.js";
 import { pruneRuntimeArtifacts } from "./retention.js";
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
@@ -46,9 +46,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const git = new GitClient(runner, cwd, config);
   const agent = new SandcastleCodexRunner();
 
-  await github.assertReady();
-  await git.assertReady();
-  await assertPreflight({ cwd, config, runner });
+  await assertRuntimeReady({ cwd, config, runner, github });
   await pruneRuntimeArtifacts({ cwd, config, runner }).catch((error) => {
     console.error(
       `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`
@@ -87,7 +85,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         config,
         validateAffected: parsed.options.validateAffected,
       },
-      { github, git, validatePullRequests, log: console.error }
+      { github, git, agent, validatePullRequests, log: console.error }
     );
     console.log(JSON.stringify(mergeSummary(result), null, 2));
     return 0;

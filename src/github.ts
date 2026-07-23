@@ -5,6 +5,8 @@ import type {
   Issue,
   IssueRef,
   PullRequest,
+  PullRequestCheck,
+  PullRequestCheckEvidence,
   PullRequestReviewSummary,
   ReviewFinding,
 } from "./types.js";
@@ -73,6 +75,35 @@ export interface PullRequestReviewInput {
     readonly body: string;
   }[];
 }
+
+export interface PullRequestCheckStatus {
+  readonly failed: readonly PullRequestCheck[];
+  readonly pending: readonly PullRequestCheck[];
+  readonly successful: readonly PullRequestCheck[];
+}
+
+const CHECK_LOG_EXCERPT_CHARS = 30_000;
+
+const SUCCESS_CHECK_STATES = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
+const PENDING_CHECK_STATES = new Set([
+  "EXPECTED",
+  "IN_PROGRESS",
+  "PENDING",
+  "QUEUED",
+  "REQUESTED",
+  "WAITING",
+]);
+const FAILURE_CHECK_STATES = new Set([
+  "CANCELLED",
+  "CANCELED",
+  "ACTION_REQUIRED",
+  "ERROR",
+  "FAILURE",
+  "FAILED",
+  "STARTUP_FAILURE",
+  "STALE",
+  "TIMED_OUT",
+]);
 
 export class GitHubClient {
   constructor(
@@ -232,6 +263,14 @@ export class GitHubClient {
     );
   }
 
+  async createPullRequestComment(
+    repo: string,
+    pullNumber: number,
+    body: string
+  ): Promise<void> {
+    await this.createIssueComment(repo, pullNumber, body);
+  }
+
   async getPullRequestByBranch(
     repo: string,
     branch: string,
@@ -381,6 +420,15 @@ export class GitHubClient {
     );
   }
 
+  async markPullRequestReady(repo: string, pullNumber: number): Promise<void> {
+    await mustRun(
+      this.runner,
+      "gh",
+      ["pr", "ready", String(pullNumber), "--repo", repo],
+      { cwd: this.cwd }
+    );
+  }
+
   async getPullRequestDiff(repo: string, pullNumber: number): Promise<string> {
     const result = await mustRun(
       this.runner,
@@ -407,6 +455,45 @@ export class GitHubClient {
         }),
       }
     );
+  }
+
+  async getPullRequestCheckEvidence(
+    repo: string,
+    pr: PullRequest
+  ): Promise<PullRequestCheckEvidence[]> {
+    const failed = pullRequestCheckStatus(pr).failed;
+    const logsByRunId = new Map<
+      string,
+      Pick<PullRequestCheckEvidence, "logExcerpt" | "logError">
+    >();
+
+    for (const runId of [
+      ...new Set(
+        failed.map((check) => check.runId).filter((id): id is string => !!id)
+      ),
+    ]) {
+      const result = await this.runner.run(
+        "gh",
+        ["run", "view", runId, "--repo", repo, "--log-failed"],
+        { cwd: this.cwd }
+      );
+      if (result.exitCode === 0) {
+        logsByRunId.set(runId, {
+          logExcerpt: truncateLog(result.stdout || result.stderr),
+        });
+      } else {
+        logsByRunId.set(runId, {
+          logError:
+            (result.stderr || result.stdout).trim() ||
+            `Unable to fetch logs for GitHub Actions run ${runId}.`,
+        });
+      }
+    }
+
+    return failed.map((check) => ({
+      ...check,
+      ...(check.runId ? logsByRunId.get(check.runId) : undefined),
+    }));
   }
 
   async mergePullRequest(
@@ -460,6 +547,26 @@ export class GitHubClient {
 
     throw new Error(`Timed out waiting for PR #${pullNumber} to merge.`);
   }
+
+  async waitForPullRequestChecks(
+    repo: string,
+    pullNumber: number,
+    timeoutMs = 15 * 60 * 1000,
+    intervalMs = 15_000
+  ): Promise<PullRequest> {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const pr = await this.getPullRequest(repo, pullNumber);
+      const checks = pullRequestCheckStatus(pr);
+      if (checks.pending.length === 0) return pr;
+      await Bun.sleep(intervalMs);
+    }
+
+    throw new Error(
+      `Timed out waiting for PR #${pullNumber} checks to settle.`
+    );
+  }
 }
 
 export function pullRequestReadinessBlockers(pr: PullRequest): string[] {
@@ -483,21 +590,15 @@ export function pullRequestReadinessBlockers(pr: PullRequest): string[] {
     blockers.push(`PR #${pr.number} is not mergeable yet (${mergeState}).`);
   }
 
-  const checks = pr.statusCheckRollup ?? [];
-  const failing = checks.filter((check) => {
-    if (typeof check !== "object" || check === null) return false;
-    const value = check as Record<string, unknown>;
-    const conclusion = String(
-      value.conclusion ?? value.state ?? value.status ?? ""
-    ).toUpperCase();
-    return !["", "SUCCESS", "SKIPPED", "NEUTRAL", "COMPLETED"].includes(
-      conclusion
-    );
-  });
-
-  if (failing.length > 0) {
+  const checkStatus = pullRequestCheckStatus(pr);
+  if (checkStatus.failed.length > 0) {
     blockers.push(
-      `PR #${pr.number} has ${failing.length} non-green status check(s).`
+      `PR #${pr.number} has ${checkStatus.failed.length} failing status check(s).`
+    );
+  }
+  if (checkStatus.pending.length > 0) {
+    blockers.push(
+      `PR #${pr.number} has ${checkStatus.pending.length} pending status check(s).`
     );
   }
 
@@ -513,8 +614,94 @@ export function isPullRequestGreen(
   return { ok: true };
 }
 
+export function pullRequestCheckStatus(
+  pr: Pick<PullRequest, "statusCheckRollup">
+): PullRequestCheckStatus {
+  const checks = (pr.statusCheckRollup ?? []).map(normalizePullRequestCheck);
+  const failed = checks.filter(isFailedCheck);
+  const pending = checks.filter(
+    (check) => !isFailedCheck(check) && isPendingCheck(check)
+  );
+  const successful = checks.filter(
+    (check) => !isFailedCheck(check) && !isPendingCheck(check)
+  );
+
+  return {
+    failed,
+    pending,
+    successful,
+  };
+}
+
 export function reviewFindingBody(finding: ReviewFinding): string {
   return [`**${finding.axis}: ${finding.title}**`, "", finding.body].join("\n");
+}
+
+function normalizePullRequestCheck(raw: unknown): PullRequestCheck {
+  if (typeof raw !== "object" || raw === null) {
+    return { name: "unknown check", status: "" };
+  }
+
+  const value = raw as Record<string, unknown>;
+  const detailsUrl =
+    stringValue(value.detailsUrl) ?? stringValue(value.targetUrl);
+  const workflowName = stringValue(value.workflowName);
+
+  return {
+    name:
+      stringValue(value.name) ??
+      stringValue(value.context) ??
+      workflowName ??
+      "unknown check",
+    status: stringValue(value.status) ?? stringValue(value.state) ?? "",
+    conclusion: stringValue(value.conclusion) ?? stringValue(value.state),
+    detailsUrl,
+    workflowName,
+    runId: detailsUrl ? actionRunId(detailsUrl) : undefined,
+  };
+}
+
+function isFailedCheck(check: PullRequestCheck): boolean {
+  const conclusion = check.conclusion?.toUpperCase() ?? "";
+  const status = check.status.toUpperCase();
+  if (
+    FAILURE_CHECK_STATES.has(conclusion) ||
+    FAILURE_CHECK_STATES.has(status)
+  ) {
+    return true;
+  }
+  return Boolean(
+    conclusion &&
+    !SUCCESS_CHECK_STATES.has(conclusion) &&
+    !PENDING_CHECK_STATES.has(conclusion) &&
+    conclusion !== "COMPLETED"
+  );
+}
+
+function isPendingCheck(check: PullRequestCheck): boolean {
+  const conclusion = check.conclusion?.toUpperCase() ?? "";
+  const status = check.status.toUpperCase();
+  return (
+    PENDING_CHECK_STATES.has(status) ||
+    PENDING_CHECK_STATES.has(conclusion) ||
+    (status !== "" &&
+      status !== "COMPLETED" &&
+      !SUCCESS_CHECK_STATES.has(status) &&
+      !FAILURE_CHECK_STATES.has(status))
+  );
+}
+
+function actionRunId(detailsUrl: string): string | undefined {
+  return detailsUrl.match(/\/actions\/runs\/([^/]+)/)?.[1];
+}
+
+function truncateLog(value: string): string {
+  if (value.length <= CHECK_LOG_EXCERPT_CHARS) return value;
+  return value.slice(-CHECK_LOG_EXCERPT_CHARS);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function normalizeIssue(raw: unknown): Issue {

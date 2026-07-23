@@ -1,12 +1,11 @@
 import type { CommandRunner } from "@/exec.js";
-import { mustRun } from "@/exec.js";
 import type { GitHubClient, GitHubIssueSummary } from "@/github.js";
-import { joinPath } from "@/path.js";
 import {
   type ScaffoldResult,
   summarizeScaffold,
   writeScaffoldFiles,
 } from "@/scaffold.js";
+import { createSetupBranchChange } from "@/setup-worktree.js";
 import type { PullRequest } from "@/types.js";
 
 export interface InitInput {
@@ -125,100 +124,10 @@ async function createSetupPullRequest(
   },
   deps: InitDeps
 ): Promise<InitResult> {
-  const tempRoot = joinPath("/tmp", `agent-train-init-${crypto.randomUUID()}`);
-  const branchExists = await remoteBranchExists(
-    deps.runner,
-    input.root,
-    input.remote,
-    input.branch
-  );
-  await fetchBranch(deps.runner, input.root, input.remote, input.targetBranch);
-  if (branchExists) {
-    await fetchBranch(deps.runner, input.root, input.remote, input.branch);
-  }
+  const setupChange = await createSetupBranchChange(input, deps.runner);
+  const { scaffold } = setupChange;
 
-  try {
-    await mustRun(
-      deps.runner,
-      "git",
-      [
-        "worktree",
-        "add",
-        "--force",
-        "--detach",
-        tempRoot,
-        `${input.remote}/${input.targetBranch}`,
-      ],
-      { cwd: input.root }
-    );
-
-    const scaffold = await writeScaffoldFiles(tempRoot, {
-      repo: input.repo,
-      targetBranch: input.targetBranch,
-      force: input.force,
-    });
-    const changed = await hasGitChanges(deps.runner, tempRoot);
-
-    if (changed) {
-      await mustRun(
-        deps.runner,
-        "git",
-        [
-          "add",
-          ".sandcastle/agent-train.config.json",
-          ".sandcastle/Dockerfile",
-          ".gitignore",
-        ],
-        { cwd: tempRoot }
-      );
-      await mustRun(
-        deps.runner,
-        "git",
-        ["commit", "-m", "Configure Agent PR Train"],
-        { cwd: tempRoot }
-      );
-    }
-
-    if (changed) {
-      await mustRun(
-        deps.runner,
-        "git",
-        [
-          "push",
-          input.remote,
-          `HEAD:refs/heads/${input.branch}`,
-          "--force-with-lease",
-        ],
-        { cwd: tempRoot }
-      );
-    }
-
-    if (!changed) {
-      return {
-        mode: "github",
-        root: input.root,
-        repo: input.repo,
-        targetBranch: input.targetBranch,
-        branch: input.branch,
-        scaffold,
-        reason:
-          "Scaffold files already exist on the target branch; no setup PR was needed.",
-      };
-    }
-
-    const issue = await findOrCreateSetupIssue(
-      deps.github,
-      input.repo,
-      scaffold
-    );
-    const pr = await deps.github.createOrUpdatePullRequest({
-      repo: input.repo,
-      title: "Configure Agent PR Train",
-      body: buildSetupPrBody(issue, scaffold),
-      baseBranch: input.targetBranch,
-      headBranch: input.branch,
-    });
-
+  if (!setupChange.changed) {
     return {
       mode: "github",
       root: input.root,
@@ -226,20 +135,35 @@ async function createSetupPullRequest(
       targetBranch: input.targetBranch,
       branch: input.branch,
       scaffold,
-      issue,
-      pr: {
-        number: pr.number,
-        url: pr.url,
-        headRefName: pr.headRefName,
-        baseRefName: pr.baseRefName,
-      },
+      reason:
+        "Scaffold files already exist on the target branch; no setup PR was needed.",
     };
-  } finally {
-    await deps.runner.run("git", ["worktree", "remove", "--force", tempRoot], {
-      cwd: input.root,
-    });
-    await deps.runner.run("rm", ["-rf", tempRoot]);
   }
+
+  const issue = await findOrCreateSetupIssue(deps.github, input.repo, scaffold);
+  const pr = await deps.github.createOrUpdatePullRequest({
+    repo: input.repo,
+    title: "Configure Agent PR Train",
+    body: buildSetupPrBody(issue, scaffold),
+    baseBranch: input.targetBranch,
+    headBranch: input.branch,
+  });
+
+  return {
+    mode: "github",
+    root: input.root,
+    repo: input.repo,
+    targetBranch: input.targetBranch,
+    branch: input.branch,
+    scaffold,
+    issue,
+    pr: {
+      number: pr.number,
+      url: pr.url,
+      headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+    },
+  };
 }
 
 async function detectGitRoot(
@@ -281,44 +205,6 @@ async function detectGitHubRepo(input: {
   } catch {
     return undefined;
   }
-}
-
-async function remoteBranchExists(
-  runner: CommandRunner,
-  cwd: string,
-  remote: string,
-  branch: string
-): Promise<boolean> {
-  const result = await runner.run(
-    "git",
-    ["ls-remote", "--exit-code", "--heads", remote, branch],
-    { cwd }
-  );
-  return result.exitCode === 0;
-}
-
-async function fetchBranch(
-  runner: CommandRunner,
-  cwd: string,
-  remote: string,
-  branch: string
-): Promise<void> {
-  await mustRun(
-    runner,
-    "git",
-    ["fetch", remote, `refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
-    { cwd }
-  );
-}
-
-async function hasGitChanges(
-  runner: CommandRunner,
-  cwd: string
-): Promise<boolean> {
-  const result = await mustRun(runner, "git", ["status", "--porcelain"], {
-    cwd,
-  });
-  return result.stdout.trim().length > 0;
 }
 
 async function findOrCreateSetupIssue(
@@ -378,7 +264,7 @@ function buildSetupIssueBody(scaffold: ScaffoldResult): string {
     "docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .",
     "```",
     "",
-    "4. Run validation before merging a train:",
+    "4. Run validation before merging a train, or let merge validate each PR as it reaches it:",
     "",
     "```bash",
     "agent-train validate --cwd . --repo OWNER/REPO",
@@ -394,7 +280,8 @@ function buildSetupIssueBody(scaffold: ScaffoldResult): string {
     "",
     "- Each implementation PR should close or reference the issue that defines the expected behavior.",
     "- Use GitHub issue dependencies to describe blocked-by and blocking relationships between specs.",
-    "- Draft PRs remain part of the dependency graph, but merge stops before draft, not-ready, or blocking-validation PRs.",
+    "- Draft PRs remain part of the dependency graph, and merge marks each draft PR ready when it reaches that PR.",
+    "- Merge attempts selected-PR validation, CI repair, and merge-state repair before it stops on unresolved blockers.",
     "",
     "## Troubleshooting",
     "",

@@ -259,7 +259,7 @@ export class GitClient {
   }
 
   private async clearManagedWorktree(worktreePath: string): Promise<void> {
-    const managedRoot = joinPath(this.cwd, ".sandcastle", "trains");
+    const managedRoot = joinPath(this.cwd, ".sandcastle", "runs");
     if (!worktreePath.startsWith(`${managedRoot}/`)) {
       throw new Error(
         `Refusing to clear unmanaged worktree path: ${worktreePath}`

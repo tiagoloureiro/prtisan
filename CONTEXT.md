@@ -20,4 +20,8 @@ Synthetic base branch: A generated branch named from the dependent PR number tha
 
 Validation pass: A review run that checks a PR against repository standards and the related issue context.
 
+Stale validation pass: A validation pass whose review marker was written for an earlier PR branch head instead of the current PR branch head.
+
 Repair pass: A Codex run on an existing PR branch that attempts to fix blocking validation findings before the tool posts remaining comments.
+
+CI repair pass: A Codex run on an existing PR branch that attempts to fix failing status checks using GitHub check evidence.

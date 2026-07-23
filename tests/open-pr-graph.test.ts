@@ -118,10 +118,11 @@ describe("open PR graph", () => {
   test("reads latest agent validation status from GitHub review bodies", () => {
     const status = validationStatusFromPr(
       pullRequest({
+        headRefOid: "current-head",
         latestReviews: [
           {
             state: "COMMENTED",
-            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"blockingFindings":0,"advisoryFindings":1,"specSkipped":true} -->`,
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"headRefOid":"current-head","blockingFindings":0,"advisoryFindings":1,"specSkipped":true} -->`,
             submittedAt: "2026-07-23T00:00:00Z",
           },
         ],
@@ -133,6 +134,26 @@ describe("open PR graph", () => {
       blockingFindings: 0,
       advisoryFindings: 1,
       specSkipped: true,
+      headRefOid: "current-head",
+    });
+  });
+
+  test("treats validation for an old head as stale", () => {
+    const status = validationStatusFromPr(
+      pullRequest({
+        headRefOid: "current-head",
+        latestReviews: [
+          {
+            state: "COMMENTED",
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"headRefOid":"old-head","blockingFindings":0,"advisoryFindings":0,"specSkipped":true} -->`,
+          },
+        ],
+      })
+    );
+
+    expect(status).toMatchObject({
+      state: "stale",
+      headRefOid: "old-head",
     });
   });
 });

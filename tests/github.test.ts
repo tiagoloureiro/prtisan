@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import type { CommandOptions, CommandResult } from "@/exec.js";
-import { GitHubClient, isPullRequestGreen } from "@/github.js";
+import {
+  GitHubClient,
+  isPullRequestGreen,
+  pullRequestCheckStatus,
+} from "@/github.js";
 
 import { FakeRunner, pullRequest } from "./helpers.js";
 
@@ -161,6 +165,79 @@ describe("GitHubClient", () => {
     expect(JSON.parse(runner.calls[0]?.options?.input ?? "{}")).toEqual({
       body: "validation summary",
     });
+  });
+
+  test("classifies failed and pending status checks", () => {
+    const checks = pullRequestCheckStatus(
+      pullRequest({
+        statusCheckRollup: [
+          {
+            name: "unit",
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+          },
+          {
+            name: "e2e",
+            status: "IN_PROGRESS",
+          },
+          {
+            name: "lint",
+            status: "COMPLETED",
+            conclusion: "SUCCESS",
+          },
+        ],
+      })
+    );
+
+    expect(checks.failed.map((check) => check.name)).toEqual(["unit"]);
+    expect(checks.pending.map((check) => check.name)).toEqual(["e2e"]);
+    expect(checks.successful.map((check) => check.name)).toEqual(["lint"]);
+  });
+
+  test("fetches GitHub Actions failed-check logs and keeps external checks as summary evidence", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue("failing test log");
+    const client = new GitHubClient(runner, "/repo");
+
+    const evidence = await client.getPullRequestCheckEvidence(
+      "o/r",
+      pullRequest({
+        statusCheckRollup: [
+          {
+            name: "actions",
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+            detailsUrl: "https://github.com/o/r/actions/runs/123/job/456",
+          },
+          {
+            context: "external-ci",
+            state: "FAILURE",
+            targetUrl: "https://ci.example.test/build/1",
+          },
+        ],
+      })
+    );
+
+    expect(runner.calls[0]?.args).toEqual([
+      "run",
+      "view",
+      "123",
+      "--repo",
+      "o/r",
+      "--log-failed",
+    ]);
+    expect(evidence).toContainEqual(
+      expect.objectContaining({
+        name: "actions",
+        runId: "123",
+        logExcerpt: "failing test log",
+      })
+    );
+    const external = evidence.find((check) => check.name === "external-ci");
+    expect(external).toMatchObject({
+      detailsUrl: "https://ci.example.test/build/1",
+    });
+    expect(external?.logExcerpt).toBeUndefined();
   });
 
   test("creates a new PR when a matching branch only has closed PRs", async () => {

@@ -82,6 +82,20 @@ export interface PullRequestReviewSummary {
   readonly authorLogin?: string;
 }
 
+export interface PullRequestCheck {
+  readonly name: string;
+  readonly status: string;
+  readonly conclusion?: string;
+  readonly detailsUrl?: string;
+  readonly workflowName?: string;
+  readonly runId?: string;
+}
+
+export interface PullRequestCheckEvidence extends PullRequestCheck {
+  readonly logExcerpt?: string;
+  readonly logError?: string;
+}
+
 export type ReviewAxis = "standards" | "spec";
 export type FindingSeverity = "blocking" | "advisory";
 

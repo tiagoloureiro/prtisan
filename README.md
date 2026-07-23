@@ -19,9 +19,9 @@ Bare `bun init` is Bun's package initializer, so `agent-train` uses package scri
 - GitHub git repo: writes the files in a temporary worktree, pushes `agent-train/setup`, creates or reuses a setup issue, and opens or updates the matching PR.
 - Non-git repo, or a repo not connected to GitHub through `gh`: writes the files directly into the target directory.
 
-`validate` loads all open PRs in the repo, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking PR findings, and posts a GitHub PR review. It also loads all open issues, validates the target branch against each issue's spec, posts issue comments with the main-branch result, and creates or updates an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and no associated PR is open.
+`validate` loads all open PRs in the repo, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking PR findings, and posts a GitHub PR review marker tied to the current PR head SHA. It also loads all open issues, validates the target branch against each issue's spec, posts issue comments with the main-branch result, and creates or updates an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and no associated PR is open.
 
-`merge` reloads all open PRs from GitHub, processes them in topological order, stops on draft/not-ready/blocking-validation PRs, squash-merges with `--match-head-commit`, restacks descendants, and revalidates affected PRs.
+`merge` reloads all open PRs from GitHub, processes them in topological order, marks draft PRs ready when it reaches them, validates or revalidates the current PR when needed, attempts CI and merge-state repair, squash-merges only after GitHub is green/mergeable with `--match-head-commit`, restacks descendants, and revalidates affected PRs.
 
 ## Requirements
 

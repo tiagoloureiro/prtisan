@@ -3,7 +3,6 @@ import { issueRepairBranch, runIdFromDate } from "@/branching.js";
 import { createLimiter, mapLimit } from "@/concurrency.js";
 import { GitClient } from "@/git.js";
 import { GitHubClient } from "@/github.js";
-import { loadOpenPrGraph, type OpenPrNode } from "@/open-pr-graph.js";
 import { preparePullRequestReview } from "@/review.js";
 import type {
   AgentTrainConfig,
@@ -11,11 +10,12 @@ import type {
   PullRequest,
   ReviewFinding,
 } from "@/types.js";
-
-type PullRequestSummary = Pick<
-  PullRequest,
-  "number" | "url" | "headRefName" | "baseRefName" | "headRefOid"
->;
+import {
+  buildValidationPlan,
+  type IssueValidationJob,
+  type PullRequestSummary,
+  summarizePullRequest,
+} from "@/validation-context.js";
 
 export interface ValidateInput {
   readonly cwd: string;
@@ -67,19 +67,19 @@ export async function executeValidate(
   deps: ValidateDeps
 ): Promise<ValidateResult> {
   const runId = input.runId ?? runIdFromDate("validate");
-  const graph = await loadOpenPrGraph({
+  const plan = await buildValidationPlan({
     github: deps.github,
     repo: input.config.repo,
     targetBranch: input.config.targetBranch,
+    pullNumbers: input.pullNumbers,
     concurrency: input.config.concurrency.github,
   });
-  const nodes = selectedNodes(graph, input.pullNumbers);
   const githubMutate = createLimiter(input.config.concurrency.github);
   const gitMutate = createLimiter(1);
   const checkedAt = new Date().toISOString();
 
   const pullRequestsPromise = mapLimit(
-    nodes,
+    plan.pullRequestJobs,
     input.config.concurrency.validate,
     async (node): Promise<PullRequestValidationResult> => {
       deps.log?.(
@@ -107,7 +107,8 @@ export async function executeValidate(
         (finding) => finding.severity === "blocking"
       );
       if ((input.repair ?? true) && blockingFindings.length > 0) {
-        const outcome = await deps.agent.repairPullRequest({
+        const outcome = await deps.agent.repair({
+          kind: "pull-request",
           cwd: input.cwd,
           config: input.config,
           runId,
@@ -174,7 +175,14 @@ export async function executeValidate(
   );
   const issuesPromise = input.pullNumbers
     ? Promise.resolve<IssueValidationResult[]>([])
-    : validateOpenIssues(input, deps, runId, graph, githubMutate, gitMutate);
+    : validateOpenIssues(
+        input,
+        deps,
+        runId,
+        plan.issueJobs,
+        githubMutate,
+        gitMutate
+      );
 
   const [pullRequests, issues] = await Promise.all([
     pullRequestsPromise,
@@ -193,11 +201,14 @@ async function collectFindings(
   input: ValidateInput,
   deps: ValidateDeps,
   runId: string,
-  node: OpenPrNode,
+  node: Awaited<
+    ReturnType<typeof buildValidationPlan>
+  >["pullRequestJobs"][number],
   pr: PullRequest,
   diff: string
 ): Promise<ReviewFinding[]> {
-  const standards = deps.agent.reviewPullRequest({
+  const standards = deps.agent.review({
+    kind: "pull-request",
     cwd: input.cwd,
     config: input.config,
     runId,
@@ -213,7 +224,8 @@ async function collectFindings(
   const reviews = node.issue
     ? await Promise.all([
         standards,
-        deps.agent.reviewPullRequest({
+        deps.agent.review({
+          kind: "pull-request",
           cwd: input.cwd,
           config: input.config,
           runId,
@@ -235,39 +247,25 @@ async function validateOpenIssues(
   input: ValidateInput,
   deps: ValidateDeps,
   runId: string,
-  graph: Awaited<ReturnType<typeof loadOpenPrGraph>>,
+  issueJobs: readonly IssueValidationJob[],
   githubMutate: <T>(task: () => Promise<T>) => Promise<T>,
   gitMutate: <T>(task: () => Promise<T>) => Promise<T>
 ): Promise<IssueValidationResult[]> {
-  const issues = await deps.github.listOpenIssues(input.config.repo);
-  if (issues.length === 0) return [];
+  if (issueJobs.length === 0) return [];
 
-  const issueCache = new Map<number, Promise<Issue>>();
-  for (const issue of issues) {
-    issueCache.set(issue.number, Promise.resolve(issue));
-  }
-
-  const getIssue = (issueNumber: number): Promise<Issue> => {
-    const cached = issueCache.get(issueNumber);
-    if (cached) return cached;
-    const promise = deps.github.getIssue(input.config.repo, issueNumber);
-    issueCache.set(issueNumber, promise);
-    return promise;
-  };
-
-  const pullRequestsByIssue = openPullRequestsByIssue(graph);
   await gitMutate(() => deps.git.fetchBranch(input.config.targetBranch));
 
   return mapLimit(
-    issues,
+    issueJobs,
     input.config.concurrency.validate,
-    async (issue): Promise<IssueValidationResult> => {
+    async (job): Promise<IssueValidationResult> => {
+      const { issue, relatedIssues, associatedOpenPullRequests } = job;
       deps.log?.(
         `Validating ${input.config.targetBranch} against issue #${issue.number}`
       );
 
-      const relatedIssues = await loadRelatedIssues(issue, getIssue);
-      const review = await deps.agent.reviewIssueBranch({
+      const review = await deps.agent.review({
+        kind: "issue-branch",
         cwd: input.cwd,
         config: input.config,
         runId,
@@ -277,8 +275,6 @@ async function validateOpenIssues(
       });
       const findings = review.findings;
       const counts = findingCounts(findings);
-      const associatedOpenPullRequests =
-        pullRequestsByIssue.get(issue.number) ?? [];
       const blockingFindings = findings.filter(
         (finding) => finding.severity === "blocking"
       );
@@ -295,7 +291,8 @@ async function validateOpenIssues(
         await gitMutate(() =>
           deps.git.prepareBranchFromBase(branch, input.config.targetBranch)
         );
-        const outcome = await deps.agent.repairIssueBranch({
+        const outcome = await deps.agent.repair({
+          kind: "issue-branch",
           cwd: input.cwd,
           config: input.config,
           runId,
@@ -360,49 +357,6 @@ async function validateOpenIssues(
       };
     }
   );
-}
-
-async function loadRelatedIssues(
-  issue: Issue,
-  getIssue: (issueNumber: number) => Promise<Issue>
-): Promise<Issue[]> {
-  const numbers = new Set<number>();
-  for (const ref of [
-    ...issue.blockedBy,
-    ...issue.blocking,
-    ...issue.subIssues,
-  ]) {
-    numbers.add(ref.number);
-  }
-  if (issue.parent) numbers.add(issue.parent.number);
-  numbers.delete(issue.number);
-  return Promise.all([...numbers].map((issueNumber) => getIssue(issueNumber)));
-}
-
-function openPullRequestsByIssue(
-  graph: Awaited<ReturnType<typeof loadOpenPrGraph>>
-): Map<number, IssueValidationResult["associatedOpenPullRequests"]> {
-  const prsByIssue = new Map<number, PullRequestSummary[]>();
-
-  for (const node of graph.nodes.values()) {
-    for (const ref of node.pr.closingIssuesReferences) {
-      const prs = prsByIssue.get(ref.number) ?? [];
-      prs.push(summarizePullRequest(node.pr));
-      prsByIssue.set(ref.number, prs);
-    }
-  }
-
-  return prsByIssue;
-}
-
-function summarizePullRequest(pr: PullRequest): PullRequestSummary {
-  return {
-    number: pr.number,
-    url: pr.url,
-    headRefName: pr.headRefName,
-    baseRefName: pr.baseRefName,
-    headRefOid: pr.headRefOid,
-  };
 }
 
 function findingCounts(findings: readonly ReviewFinding[]): {
@@ -519,28 +473,4 @@ function pullRequestMarkdownLink(
   pr: Pick<PullRequest, "number" | "url">
 ): string {
   return pr.url ? `[#${pr.number}](${pr.url})` : `#${pr.number}`;
-}
-
-function selectedNodes(
-  graph: Awaited<ReturnType<typeof loadOpenPrGraph>>,
-  pullNumbers?: readonly number[]
-): OpenPrNode[] {
-  const wanted = pullNumbers ? new Set(pullNumbers) : undefined;
-  const nodes = graph.topologicalOrder
-    .map((prNumber) => graph.nodes.get(prNumber))
-    .filter((node): node is OpenPrNode =>
-      Boolean(node && (!wanted || wanted.has(node.pr.number)))
-    );
-
-  if (wanted) {
-    const found = new Set(nodes.map((node) => node.pr.number));
-    const missing = [...wanted].filter((prNumber) => !found.has(prNumber));
-    if (missing.length > 0) {
-      throw new Error(
-        `Open PR(s) not found in ${graph.topologicalOrder.length} loaded PRs: ${missing.map((number) => `#${number}`).join(", ")}.`
-      );
-    }
-  }
-
-  return nodes;
 }

@@ -1,9 +1,11 @@
 import { mapLimit } from "./concurrency.js";
 import type { GitHubClient } from "./github.js";
+import { GitHubIssueContext } from "./issue-context.js";
 import { VALIDATION_REVIEW_MARKER } from "./review.js";
 import type { Issue, PullRequest } from "./types.js";
 
-export type PrValidationState = "missing" | "passed" | "commented" | "blocked";
+export type PrValidationState =
+  "missing" | "stale" | "passed" | "commented" | "blocked";
 
 export interface PrValidationStatus {
   readonly state: PrValidationState;
@@ -12,6 +14,7 @@ export interface PrValidationStatus {
   readonly advisoryFindings: number;
   readonly reviewEvent?: "COMMENT" | "REQUEST_CHANGES";
   readonly specSkipped?: boolean;
+  readonly headRefOid?: string;
 }
 
 export interface OpenPrNode {
@@ -52,16 +55,11 @@ export async function loadOpenPrGraph(input: {
   readonly repo: string;
   readonly targetBranch: string;
   readonly concurrency?: number;
+  readonly issueContext?: GitHubIssueContext;
 }): Promise<OpenPrGraph> {
   const prs = await input.github.listOpenPullRequests(input.repo);
-  const issues = new Map<number, Promise<Issue>>();
-  const getIssue = (issueNumber: number): Promise<Issue> => {
-    const cached = issues.get(issueNumber);
-    if (cached) return cached;
-    const promise = input.github.getIssue(input.repo, issueNumber);
-    issues.set(issueNumber, promise);
-    return promise;
-  };
+  const issueContext =
+    input.issueContext ?? new GitHubIssueContext(input.github, input.repo);
   const enriched = await mapLimit(
     prs,
     input.concurrency ?? 4,
@@ -69,30 +67,13 @@ export async function loadOpenPrGraph(input: {
       const issueNumber = primaryClosingIssueNumber(pr);
       if (!issueNumber) return { pr, relatedIssues: [] };
 
-      const issue = await getIssue(issueNumber);
-      const relatedIssues = await loadRelatedIssues(issue, getIssue);
+      const issue = await issueContext.get(issueNumber);
+      const relatedIssues = await issueContext.relatedIssues(issue);
       return { pr, issue, relatedIssues };
     }
   );
 
   return buildOpenPrGraph(enriched, input.targetBranch);
-}
-
-async function loadRelatedIssues(
-  issue: Issue,
-  getIssue: (issueNumber: number) => Promise<Issue>
-): Promise<Issue[]> {
-  const numbers = new Set<number>();
-  for (const ref of [
-    ...issue.blockedBy,
-    ...issue.blocking,
-    ...issue.subIssues,
-  ]) {
-    numbers.add(ref.number);
-  }
-  if (issue.parent) numbers.add(issue.parent.number);
-  numbers.delete(issue.number);
-  return Promise.all([...numbers].map((issueNumber) => getIssue(issueNumber)));
 }
 
 export function buildOpenPrGraph(
@@ -206,7 +187,7 @@ export function primaryClosingIssueNumber(
 }
 
 export function validationStatusFromPr(
-  pr: Pick<PullRequest, "latestReviews">
+  pr: Pick<PullRequest, "latestReviews" | "headRefOid">
 ): PrValidationStatus {
   const review = [...pr.latestReviews]
     .reverse()
@@ -222,6 +203,23 @@ export function validationStatusFromPr(
   const meta = parseValidationMarker(review.body);
   const blockingFindings = meta.blockingFindings ?? 0;
   const advisoryFindings = meta.advisoryFindings ?? 0;
+  const reviewEvent =
+    blockingFindings > 0 || review.state.toUpperCase() === "CHANGES_REQUESTED"
+      ? "REQUEST_CHANGES"
+      : "COMMENT";
+
+  if (meta.headRefOid !== pr.headRefOid) {
+    return {
+      state: "stale",
+      checkedAt: review.submittedAt,
+      blockingFindings,
+      advisoryFindings,
+      reviewEvent,
+      specSkipped: meta.specSkipped,
+      headRefOid: meta.headRefOid,
+    };
+  }
+
   const blocked =
     blockingFindings > 0 || review.state.toUpperCase() === "CHANGES_REQUESTED";
 
@@ -230,8 +228,9 @@ export function validationStatusFromPr(
     checkedAt: review.submittedAt,
     blockingFindings,
     advisoryFindings,
-    reviewEvent: blocked ? "REQUEST_CHANGES" : "COMMENT",
+    reviewEvent,
     specSkipped: meta.specSkipped,
+    headRefOid: meta.headRefOid,
   };
 }
 
@@ -243,11 +242,14 @@ function parseValidationMarker(body: string): Partial<PrValidationStatus> {
 
   try {
     const parsed = JSON.parse(match[1]) as {
+      headRefOid?: unknown;
       blockingFindings?: unknown;
       advisoryFindings?: unknown;
       specSkipped?: unknown;
     };
     return {
+      headRefOid:
+        typeof parsed.headRefOid === "string" ? parsed.headRefOid : undefined,
       blockingFindings:
         typeof parsed.blockingFindings === "number"
           ? parsed.blockingFindings

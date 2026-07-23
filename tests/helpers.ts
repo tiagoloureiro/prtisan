@@ -1,36 +1,39 @@
+import { defaultConfig } from "@/config.js";
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
 import type { AgentTrainConfig, Issue, PullRequest } from "@/types.js";
 
 export function testConfig(
   input: Partial<AgentTrainConfig> = {}
 ): AgentTrainConfig {
+  const defaults = defaultConfig({
+    repo: input.repo ?? "o/r",
+    targetBranch: input.targetBranch ?? "main",
+  });
+
   return {
-    repo: "o/r",
-    targetBranch: "main",
-    remote: "origin",
+    ...defaults,
+    ...input,
     models: {
-      repair: "gpt-5.6-terra",
-      review: "gpt-5.6-luna",
+      ...defaults.models,
+      ...input.models,
     },
     reasoning: {
-      repair: "medium",
-      review: "low",
+      ...defaults.reasoning,
+      ...input.reasoning,
     },
     concurrency: {
-      validate: 4,
-      github: 4,
+      ...defaults.concurrency,
+      ...input.concurrency,
     },
     docker: {
-      imageName: "sandcastle:agent-train",
-      codexHome: ".sandcastle/codex-home",
-      mounts: [],
+      ...defaults.docker,
+      ...input.docker,
+      mounts: input.docker?.mounts ?? defaults.docker.mounts,
     },
     retention: {
-      ttlDays: 14,
-      maxLogBytes: 10 * 1024 * 1024,
-      keepSessions: true,
+      ...defaults.retention,
+      ...input.retention,
     },
-    ...input,
   };
 }
 

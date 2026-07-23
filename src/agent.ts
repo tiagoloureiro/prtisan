@@ -4,8 +4,10 @@ import { issueReviewSandboxBranch, reviewSandboxBranch } from "./branching.js";
 import { ensureDir, pathExists, readText, writeText } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
 import {
+  buildCiRepairPrompt,
   buildIssueBranchRepairPrompt,
   buildIssueBranchReviewPrompt,
+  buildMergeStateRepairPrompt,
   buildRepairPrompt,
   buildReviewPrompt,
 } from "./prompts.js";
@@ -13,6 +15,7 @@ import type {
   AgentRunOutcome,
   AgentTrainConfig,
   Issue,
+  PullRequestCheckEvidence,
   ReasoningEffort,
   ReviewAxis,
   ReviewFinding,
@@ -62,6 +65,31 @@ export interface RepairPullRequestInput {
   readonly findings: readonly ReviewFinding[];
 }
 
+export interface RepairCiFailureInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly issue?: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly checkEvidence: readonly PullRequestCheckEvidence[];
+}
+
+export interface RepairMergeStateInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly issue?: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly mergeState: string;
+  readonly blockers: readonly string[];
+}
+
 export interface ReviewIssueBranchInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
@@ -82,27 +110,50 @@ export interface RepairIssueBranchInput {
   readonly findings: readonly ReviewFinding[];
 }
 
+export type AgentReviewTask =
+  | ({ readonly kind: "pull-request" } & ReviewPullRequestInput)
+  | ({ readonly kind: "issue-branch" } & ReviewIssueBranchInput);
+
+export type AgentRepairTask =
+  | ({ readonly kind: "pull-request" } & RepairPullRequestInput)
+  | ({ readonly kind: "ci-failure" } & RepairCiFailureInput)
+  | ({ readonly kind: "merge-state" } & RepairMergeStateInput)
+  | ({ readonly kind: "issue-branch" } & RepairIssueBranchInput);
+
 export interface AgentRunner {
-  reviewPullRequest(input: ReviewPullRequestInput): Promise<ReviewReport>;
-  repairPullRequest(input: RepairPullRequestInput): Promise<AgentRunOutcome>;
-  reviewIssueBranch(input: ReviewIssueBranchInput): Promise<ReviewReport>;
-  repairIssueBranch(input: RepairIssueBranchInput): Promise<AgentRunOutcome>;
+  review(input: AgentReviewTask): Promise<ReviewReport>;
+  repair(input: AgentRepairTask): Promise<AgentRunOutcome>;
 }
 
 export class SandcastleCodexRunner implements AgentRunner {
-  async reviewPullRequest(
-    input: ReviewPullRequestInput
-  ): Promise<ReviewReport> {
+  async review(input: AgentReviewTask): Promise<ReviewReport> {
+    const run =
+      input.kind === "pull-request"
+        ? {
+            branch: reviewSandboxBranch(input.prNumber, input.axis),
+            baseBranch: input.branch,
+            name: `review-${input.axis}-${input.prNumber}`,
+            prompt: buildReviewPrompt(input),
+            axis: input.axis,
+          }
+        : {
+            branch: issueReviewSandboxBranch(input.issue.number),
+            baseBranch: input.targetBranch,
+            name: `review-spec-issue-${input.issue.number}`,
+            prompt: buildIssueBranchReviewPrompt(input),
+            axis: "spec" as const,
+          };
+
     const result = await this.runCodex({
       cwd: input.cwd,
       config: input.config,
       runId: input.runId,
-      branch: reviewSandboxBranch(input.prNumber, input.axis),
-      baseBranch: input.branch,
-      name: `review-${input.axis}-${input.prNumber}`,
+      branch: run.branch,
+      baseBranch: run.baseBranch,
+      name: run.name,
       model: input.config.models.review,
       effort: input.config.reasoning.review,
-      prompt: buildReviewPrompt(input),
+      prompt: run.prompt,
       maxIterations: 1,
       structuredOutput: {
         tag: "review",
@@ -113,54 +164,56 @@ export class SandcastleCodexRunner implements AgentRunner {
 
     return parseReviewReport(
       result.structuredOutput ?? result.stdout,
-      input.axis
+      run.axis
     );
   }
 
-  async repairPullRequest(
-    input: RepairPullRequestInput
-  ): Promise<AgentRunOutcome> {
-    return this.runCodex({
-      cwd: input.cwd,
-      config: input.config,
-      runId: input.runId,
-      branch: input.branch,
-      baseBranch: input.baseBranch,
-      name: `repair-${input.prNumber}`,
-      model: input.config.models.repair,
-      effort: input.config.reasoning.repair,
-      prompt: buildRepairPrompt(input),
-      maxIterations: 3,
-    });
-  }
+  async repair(input: AgentRepairTask): Promise<AgentRunOutcome> {
+    if (input.kind === "pull-request") {
+      return this.runCodex({
+        cwd: input.cwd,
+        config: input.config,
+        runId: input.runId,
+        branch: input.branch,
+        baseBranch: input.baseBranch,
+        name: `repair-${input.prNumber}`,
+        model: input.config.models.repair,
+        effort: input.config.reasoning.repair,
+        prompt: buildRepairPrompt(input),
+        maxIterations: 3,
+      });
+    }
 
-  async reviewIssueBranch(
-    input: ReviewIssueBranchInput
-  ): Promise<ReviewReport> {
-    const result = await this.runCodex({
-      cwd: input.cwd,
-      config: input.config,
-      runId: input.runId,
-      branch: issueReviewSandboxBranch(input.issue.number),
-      baseBranch: input.targetBranch,
-      name: `review-spec-issue-${input.issue.number}`,
-      model: input.config.models.review,
-      effort: input.config.reasoning.review,
-      prompt: buildIssueBranchReviewPrompt(input),
-      maxIterations: 1,
-      structuredOutput: {
-        tag: "review",
-        schema: ReviewOutputSchema,
-        maxRetries: 2,
-      },
-    });
+    if (input.kind === "ci-failure") {
+      return this.runCodex({
+        cwd: input.cwd,
+        config: input.config,
+        runId: input.runId,
+        branch: input.branch,
+        baseBranch: input.baseBranch,
+        name: `repair-ci-${input.prNumber}`,
+        model: input.config.models.repair,
+        effort: input.config.reasoning.repair,
+        prompt: buildCiRepairPrompt(input),
+        maxIterations: 3,
+      });
+    }
 
-    return parseReviewReport(result.structuredOutput ?? result.stdout, "spec");
-  }
+    if (input.kind === "merge-state") {
+      return this.runCodex({
+        cwd: input.cwd,
+        config: input.config,
+        runId: input.runId,
+        branch: input.branch,
+        baseBranch: input.baseBranch,
+        name: `repair-merge-state-${input.prNumber}`,
+        model: input.config.models.repair,
+        effort: input.config.reasoning.repair,
+        prompt: buildMergeStateRepairPrompt(input),
+        maxIterations: 3,
+      });
+    }
 
-  async repairIssueBranch(
-    input: RepairIssueBranchInput
-  ): Promise<AgentRunOutcome> {
     return this.runCodex({
       cwd: input.cwd,
       config: input.config,

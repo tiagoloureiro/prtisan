@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import { findDiffPosition, parseUnifiedDiff } from "@/diff.js";
 import { preparePullRequestReview } from "@/review.js";
 import type { ReviewFinding } from "@/types.js";
 
@@ -21,19 +20,50 @@ index 111..222 100644
 +const added = true;
 `;
 
-describe("diff mapping", () => {
-  test("maps new and old lines to GitHub diff positions", () => {
-    const lines = parseUnifiedDiff(diff);
+describe("review preparation", () => {
+  test("maps findings on new and old lines to GitHub review comments", () => {
+    const pr = pullRequest({
+      number: 1,
+      url: "",
+      title: "",
+      headRefName: "h",
+      baseRefName: "b",
+      headRefOid: "sha",
+    });
+    const findings: ReviewFinding[] = [
+      {
+        axis: "spec",
+        severity: "blocking",
+        title: "Old line",
+        body: "The removed line is wrong.",
+        path: "src/a.ts",
+        line: 2,
+        side: "LEFT",
+      },
+      {
+        axis: "spec",
+        severity: "blocking",
+        title: "New line",
+        body: "The added line is wrong.",
+        path: "src/a.ts",
+        line: 3,
+      },
+      {
+        axis: "spec",
+        severity: "blocking",
+        title: "Later line",
+        body: "The later added line is wrong.",
+        path: "src/a.ts",
+        line: 12,
+      },
+    ];
 
-    expect(
-      findDiffPosition(lines, { path: "src/a.ts", line: 2, side: "LEFT" })
-    ).toBe(2);
-    expect(
-      findDiffPosition(lines, { path: "src/a.ts", line: 3, side: "RIGHT" })
-    ).toBe(4);
-    expect(
-      findDiffPosition(lines, { path: "src/a.ts", line: 12, side: "RIGHT" })
-    ).toBe(7);
+    const review = preparePullRequestReview({ pr, diff, findings });
+
+    expect(review.comments.map((comment) => comment.position)).toEqual([
+      2, 4, 7,
+    ]);
+    expect(review.summaryCount).toBe(0);
   });
 
   test("keeps unmappable findings in review body", () => {
@@ -58,6 +88,7 @@ describe("diff mapping", () => {
 
     const review = preparePullRequestReview({ pr, diff, findings });
     expect(review.event).toBe("REQUEST_CHANGES");
+    expect(review.body).toContain('"headRefOid":"sha"');
     expect(review.comments).toHaveLength(0);
     expect(review.summaryCount).toBe(1);
   });
