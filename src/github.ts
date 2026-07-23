@@ -1,4 +1,4 @@
-import type { CommandRunner } from "./exec.js";
+import { CommandError, type CommandRunner } from "./exec.js";
 import { mustRun, runJson } from "./exec.js";
 import { writeText } from "./fs.js";
 import type {
@@ -39,6 +39,7 @@ const PR_JSON_FIELDS = [
   "reviewDecision",
   "closingIssuesReferences",
   "latestReviews",
+  "reviews",
   "statusCheckRollup",
 ].join(",");
 
@@ -441,6 +442,40 @@ export class GitHubClient {
 
   async createPullRequestReview(input: PullRequestReviewInput): Promise<void> {
     const route = `/repos/${input.repo}/pulls/${input.pullNumber}/reviews`;
+    try {
+      await this.postPullRequestReview(route, input);
+    } catch (error) {
+      if (!isUnprocessableEntity(error)) throw error;
+
+      const commentInput =
+        input.event === "REQUEST_CHANGES"
+          ? { ...input, event: "COMMENT" as const }
+          : input;
+
+      if (commentInput !== input) {
+        try {
+          await this.postPullRequestReview(route, commentInput);
+          return;
+        } catch (commentError) {
+          if (
+            !isUnprocessableEntity(commentError) ||
+            commentInput.comments.length === 0
+          ) {
+            throw commentError;
+          }
+        }
+      } else if (commentInput.comments.length === 0) {
+        throw error;
+      }
+
+      await this.postPullRequestReview(route, bodyOnlyReview(commentInput));
+    }
+  }
+
+  private async postPullRequestReview(
+    route: string,
+    input: PullRequestReviewInput
+  ): Promise<void> {
     await mustRun(
       this.runner,
       "gh",
@@ -746,6 +781,7 @@ function normalizePullRequest(raw: unknown): PullRequest {
       : [],
     closingIssuesReferences: normalizeRefs(value.closingIssuesReferences),
     latestReviews: normalizeLatestReviews(value.latestReviews),
+    reviews: normalizeLatestReviews(value.reviews),
   };
 }
 
@@ -772,6 +808,34 @@ function normalizeAuthorLogin(value: unknown): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const login = (value as { login?: unknown }).login;
   return typeof login === "string" ? login : undefined;
+}
+
+function isUnprocessableEntity(error: unknown): boolean {
+  return (
+    error instanceof CommandError &&
+    error.result.exitCode === 1 &&
+    /HTTP 422|Unprocessable Entity/i.test(
+      `${error.result.stderr}\n${error.result.stdout}`
+    )
+  );
+}
+
+function bodyOnlyReview(input: PullRequestReviewInput): PullRequestReviewInput {
+  return {
+    ...input,
+    event: "COMMENT",
+    body: [
+      input.body,
+      "",
+      "GitHub rejected the inline review comments for this diff, so agent-train is preserving them in the review body.",
+      "",
+      ...input.comments.map(
+        (comment) =>
+          `- **${comment.path} (diff position ${comment.position})**\n\n  ${comment.body.replace(/\n/g, "\n  ")}`
+      ),
+    ].join("\n"),
+    comments: [],
+  };
 }
 
 function normalizeIssueSummary(raw: unknown): GitHubIssueSummary {

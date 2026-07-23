@@ -187,9 +187,9 @@ export function primaryClosingIssueNumber(
 }
 
 export function validationStatusFromPr(
-  pr: Pick<PullRequest, "latestReviews" | "headRefOid">
+  pr: Pick<PullRequest, "latestReviews" | "reviews" | "headRefOid">
 ): PrValidationStatus {
-  const review = [...pr.latestReviews]
+  const review = [...pr.latestReviews, ...pr.reviews]
     .reverse()
     .find((item) => item.body.includes(VALIDATION_REVIEW_MARKER));
   if (!review) {

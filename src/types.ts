@@ -72,6 +72,7 @@ export interface PullRequest {
   readonly reviewDecision?: string;
   readonly closingIssuesReferences: readonly IssueRef[];
   readonly latestReviews: readonly PullRequestReviewSummary[];
+  readonly reviews: readonly PullRequestReviewSummary[];
   readonly statusCheckRollup?: readonly unknown[];
 }
 

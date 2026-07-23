@@ -42,7 +42,10 @@ export interface ReadyPullRequest {
 
 const CHECK_WAIT_TIMEOUT_MS = 15 * 60 * 1000;
 const CHECK_WAIT_INTERVAL_MS = 15_000;
+const POST_REPAIR_HEAD_REFRESH_ATTEMPTS = 10;
+const POST_REPAIR_HEAD_REFRESH_INTERVAL_MS = 2_000;
 const MERGE_STATE_REPAIR_LIMIT = 3;
+const VALIDATION_REPAIR_LIMIT_PER_HEAD = 6;
 const REPAIRABLE_MERGE_STATES = new Set([
   "BEHIND",
   "BLOCKED",
@@ -57,6 +60,7 @@ export async function preparePullRequestForMerge(
   let currentGraph = input.graph;
   let ciRepairAttemptedHeadRefOid: string | undefined;
   let mergeStateRepairAttempts = 0;
+  const validationRepairAttemptsByHead = new Map<string, number>();
 
   while (true) {
     let node = currentGraph.nodes.get(input.prNumber);
@@ -75,7 +79,29 @@ export async function preparePullRequestForMerge(
       continue;
     }
 
+    if (
+      node.blockers.length === 0 &&
+      node.pr.baseRefName !== input.config.targetBranch
+    ) {
+      currentGraph = await restackFrontierOntoTarget(input, deps, node);
+      continue;
+    }
+
     if (validationNeedsRepair(node)) {
+      const validationRepairAttempts =
+        validationRepairAttemptsByHead.get(node.pr.headRefOid) ?? 0;
+      if (validationRepairAttempts >= VALIDATION_REPAIR_LIMIT_PER_HEAD) {
+        throw new Error(
+          formatReadinessBlockers(node.pr.number, [
+            ...validationBlockers(node),
+            `Validation repair reached ${VALIDATION_REPAIR_LIMIT_PER_HEAD} attempt(s) for head ${shortSha(node.pr.headRefOid)}.`,
+          ])
+        );
+      }
+      validationRepairAttemptsByHead.set(
+        node.pr.headRefOid,
+        validationRepairAttempts + 1
+      );
       currentGraph = await validateCurrentPullRequest(input, deps, node);
       continue;
     }
@@ -143,6 +169,34 @@ export async function preparePullRequestForMerge(
   }
 }
 
+async function restackFrontierOntoTarget(
+  input: MergeReadinessInput,
+  deps: MergeReadinessDeps,
+  node: OpenPrNode
+): Promise<OpenPrGraph> {
+  deps.log?.(
+    `Restacking PR #${node.pr.number} from ${node.pr.baseRefName} onto ${input.config.targetBranch}`
+  );
+  const diffBaseRef = node.pr.baseRefOid || node.pr.baseRefName;
+  const nextBaseAnchorSha = await deps.git.recreateBranchFromBaseDiff({
+    runId: input.runId,
+    label: `restack-pr-${node.pr.number}-to-target`,
+    branch: node.pr.headRefName,
+    baseBranch: input.config.targetBranch,
+    diffBaseRef,
+    commitMessage: `Restack PR #${node.pr.number} onto ${input.config.targetBranch}`,
+  });
+  await deps.github.editPullRequestBase(
+    input.config.repo,
+    node.pr.number,
+    input.config.targetBranch
+  );
+  deps.log?.(
+    `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${input.config.targetBranch} at ${nextBaseAnchorSha}`
+  );
+  return loadCurrentGraph(input, deps);
+}
+
 async function validateCurrentPullRequest(
   input: MergeReadinessInput,
   deps: MergeReadinessDeps,
@@ -159,11 +213,6 @@ async function validateCurrentPullRequest(
   const graph = await loadCurrentGraph(input, deps);
   const refreshed = graph.nodes.get(node.pr.number);
   if (!refreshed) return graph;
-
-  const blockers = validationBlockers(refreshed);
-  if (blockers.length > 0) {
-    throw new Error(formatReadinessBlockers(refreshed.pr.number, blockers));
-  }
 
   return graph;
 }
@@ -207,6 +256,12 @@ async function repairCiFailure(
   }
 
   await deps.git.pushBranch(node.pr.headRefName);
+  await waitForPullRequestHead(
+    input,
+    deps,
+    node.pr.number,
+    outcome.commits.at(-1)
+  );
   const checked = await deps.github.waitForPullRequestChecks(
     input.config.repo,
     node.pr.number,
@@ -228,6 +283,42 @@ async function repairCiFailure(
   }
 
   return validateCurrentPullRequest(input, deps, node);
+}
+
+async function waitForPullRequestHead(
+  input: Pick<MergeReadinessInput, "config">,
+  deps: Pick<MergeReadinessDeps, "github" | "log">,
+  pullNumber: number,
+  expectedHeadRefOid: string | undefined
+): Promise<PullRequest> {
+  let pr = await deps.github.getPullRequest(input.config.repo, pullNumber);
+  if (
+    !expectedHeadRefOid ||
+    headMatchesExpected(pr.headRefOid, expectedHeadRefOid)
+  ) {
+    return pr;
+  }
+
+  for (
+    let attempt = 1;
+    attempt < POST_REPAIR_HEAD_REFRESH_ATTEMPTS;
+    attempt++
+  ) {
+    deps.log?.(
+      `Waiting for PR #${pullNumber} head to update from ${shortSha(
+        pr.headRefOid
+      )} to ${shortSha(expectedHeadRefOid)}`
+    );
+    await Bun.sleep(POST_REPAIR_HEAD_REFRESH_INTERVAL_MS);
+    pr = await deps.github.getPullRequest(input.config.repo, pullNumber);
+    if (headMatchesExpected(pr.headRefOid, expectedHeadRefOid)) return pr;
+  }
+
+  throw new Error(
+    `PR #${pullNumber} still reports head ${shortSha(
+      pr.headRefOid
+    )} after repair pushed ${shortSha(expectedHeadRefOid)}.`
+  );
 }
 
 async function repairMergeState(
@@ -263,6 +354,12 @@ async function repairMergeState(
   }
 
   await deps.git.pushBranch(node.pr.headRefName);
+  await waitForPullRequestHead(
+    input,
+    deps,
+    node.pr.number,
+    outcome.commits.at(-1)
+  );
   await deps.github.waitForPullRequestChecks(
     input.config.repo,
     node.pr.number,
@@ -404,6 +501,16 @@ function formatReadinessBlockers(
     `PR #${prNumber} is not ready to merge:`,
     ...blockers.map((blocker) => `- ${blocker}`),
   ].join("\n");
+}
+
+function headMatchesExpected(
+  headRefOid: string,
+  expectedHeadRefOid: string
+): boolean {
+  return (
+    headRefOid === expectedHeadRefOid ||
+    headRefOid.startsWith(expectedHeadRefOid)
+  );
 }
 
 function shortSha(value: string): string {

@@ -21,9 +21,12 @@ describe("scaffold", () => {
       `${root}/.sandcastle/agent-train.config.json`
     );
     expect(config).toContain('"repo": "o/r"');
-    expect(await readText(`${root}/.sandcastle/Dockerfile`)).toContain(
-      "FROM oven/bun:"
-    );
+    const dockerfile = await readText(`${root}/.sandcastle/Dockerfile`);
+    expect(dockerfile).toContain("FROM oven/bun:");
+    expect(dockerfile).toContain("ARG AGENT_UID=1000");
+    expect(dockerfile).toContain("ARG AGENT_GID=1000");
+    expect(dockerfile).toContain("ENV HOME=/home/agent");
+    expect(dockerfile).toContain('CMD ["sleep", "infinity"]');
     expect(await readText(`${root}/.gitignore`)).toContain(
       ".sandcastle/codex-home/"
     );

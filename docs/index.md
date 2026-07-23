@@ -95,6 +95,20 @@ agent-train merge --cwd /path/to/repo --repo OWNER/REPO
 
 After each squash merge, affected descendants are restacked and validation is rerun for the impacted part of the train. For PRs that depend on multiple blockers, Agent PR Train may create synthetic base branches so GitHub's single-base-branch PR model can still represent a DAG-shaped dependency graph.
 
+## TUI
+
+Run:
+
+```bash
+agent-train tui --cwd /path/to/repo --repo OWNER/REPO
+```
+
+`tui` opens an interactive terminal dashboard for operating the same validate and merge workflows. It shows the configured repository and target branch, runtime readiness diagnostics, open PR train layers, validation state, draft status, blockers, and recent workflow events.
+
+Actions include refreshing the train, running preflight, validating, merging, and quitting. Validate and merge require explicit confirmation because validation can repair and push branches or post GitHub reviews/comments, and merge can squash PRs.
+
+The TUI requires an interactive terminal. In CI, piped output, or other non-TTY environments, use `agent-train validate` or `agent-train merge` directly.
+
 ## Codex And Sandcastle Setup
 
 Seed the dedicated Codex home once in the target repository:
@@ -120,6 +134,7 @@ Do not mount your full personal `~/.codex` into agent containers. The dedicated 
 - Docker image not found: rebuild with `docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .`.
 - Setup branch looks stale: rerun `agent-train init`; the setup branch is rebuilt from the target branch and pushed with `--force-with-lease`.
 - Validation is too aggressive: run `agent-train validate --no-repair` to collect review output without repair commits.
+- `agent-train tui` refuses to start: run it from an interactive terminal, or use `agent-train validate` or `agent-train merge` for non-interactive automation.
 
 ## Development
 

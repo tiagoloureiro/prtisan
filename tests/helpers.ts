@@ -67,6 +67,7 @@ export function pullRequest(input: Partial<PullRequest>): PullRequest {
     headRefOid: `head-${number}`,
     closingIssuesReferences: [],
     latestReviews: [],
+    reviews: [],
     statusCheckRollup: [],
     ...input,
   };

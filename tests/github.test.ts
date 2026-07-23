@@ -50,6 +50,13 @@ describe("GitHubClient", () => {
           headRefOid: "head",
           closingIssuesReferences: [{ number: 70, title: "Spec" }],
           latestReviews: [],
+          reviews: [
+            {
+              state: "COMMENTED",
+              body: "review body",
+              author: { login: "agent" },
+            },
+          ],
           statusCheckRollup: [],
         },
       ])
@@ -75,6 +82,7 @@ describe("GitHubClient", () => {
       number: 7,
       isDraft: true,
       closingIssuesReferences: [{ number: 70, title: "Spec" }],
+      reviews: [{ state: "COMMENTED", authorLogin: "agent" }],
     });
   });
 
@@ -145,6 +153,51 @@ describe("GitHubClient", () => {
       commit_id: "abc",
       event: "REQUEST_CHANGES",
       comments: [{ path: "src/a.ts", position: 4, body: "finding" }],
+    });
+  });
+
+  test("downgrades unprocessable change requests to review comments", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue("", 1, "gh: Unprocessable Entity (HTTP 422)");
+    runner.enqueue("");
+    const client = new GitHubClient(runner, "/repo");
+
+    await client.createPullRequestReview({
+      repo: "o/r",
+      pullNumber: 12,
+      commitId: "abc",
+      event: "REQUEST_CHANGES",
+      body: "summary",
+      comments: [{ path: "src/a.ts", position: 4, body: "finding" }],
+    });
+
+    expect(runner.calls).toHaveLength(2);
+    expect(JSON.parse(runner.calls[1]?.options?.input ?? "{}")).toMatchObject({
+      event: "COMMENT",
+      comments: [{ path: "src/a.ts", position: 4, body: "finding" }],
+    });
+  });
+
+  test("preserves rejected inline comments in a body-only review", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue("", 1, "gh: Unprocessable Entity (HTTP 422)");
+    runner.enqueue("");
+    const client = new GitHubClient(runner, "/repo");
+
+    await client.createPullRequestReview({
+      repo: "o/r",
+      pullNumber: 12,
+      commitId: "abc",
+      event: "COMMENT",
+      body: "summary",
+      comments: [{ path: "src/a.ts", position: 4, body: "finding" }],
+    });
+
+    expect(runner.calls).toHaveLength(2);
+    expect(JSON.parse(runner.calls[1]?.options?.input ?? "{}")).toMatchObject({
+      event: "COMMENT",
+      comments: [],
+      body: expect.stringContaining("finding"),
     });
   });
 

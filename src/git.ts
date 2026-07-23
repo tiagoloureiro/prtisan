@@ -222,6 +222,100 @@ export class GitClient {
     }
   }
 
+  async recreateBranchFromBaseDiff(input: {
+    readonly runId: string;
+    readonly label: string;
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly diffBaseRef: string;
+    readonly commitMessage: string;
+  }): Promise<string> {
+    const worktreePath = joinPath(
+      this.cwd,
+      ".sandcastle",
+      "runs",
+      input.runId,
+      "worktrees",
+      input.label
+    );
+
+    await this.clearManagedWorktree(worktreePath);
+    await this.fetchBranch(input.branch);
+    await this.fetchBranch(input.baseBranch);
+
+    try {
+      await mustRun(
+        this.runner,
+        "git",
+        [
+          "worktree",
+          "add",
+          "--force",
+          "--detach",
+          worktreePath,
+          `${this.config.remote}/${input.baseBranch}`,
+        ],
+        { cwd: this.cwd }
+      );
+
+      await mustRun(this.runner, "git", ["switch", "-C", input.branch], {
+        cwd: worktreePath,
+      });
+      const nextBaseAnchorSha = await this.revParseRemoteBranch(
+        input.baseBranch
+      );
+      const diff = await mustRun(
+        this.runner,
+        "git",
+        [
+          "diff",
+          "--binary",
+          input.diffBaseRef,
+          `${this.config.remote}/${input.branch}`,
+        ],
+        { cwd: this.cwd }
+      );
+
+      if (diff.stdout.trim().length > 0) {
+        await mustRun(this.runner, "git", ["apply", "--3way", "--index", "-"], {
+          cwd: worktreePath,
+          input: diff.stdout,
+        });
+      }
+
+      const staged = await this.runner.run(
+        "git",
+        ["diff", "--cached", "--quiet"],
+        { cwd: worktreePath }
+      );
+      if (staged.exitCode !== 0) {
+        await mustRun(
+          this.runner,
+          "git",
+          ["commit", "-m", input.commitMessage],
+          {
+            cwd: worktreePath,
+          }
+        );
+      }
+      await mustRun(
+        this.runner,
+        "git",
+        ["push", this.config.remote, input.branch, "--force-with-lease"],
+        {
+          cwd: worktreePath,
+        }
+      );
+      return nextBaseAnchorSha;
+    } finally {
+      await this.runner.run(
+        "git",
+        ["worktree", "remove", "--force", worktreePath],
+        { cwd: this.cwd }
+      );
+    }
+  }
+
   async deleteRemoteBranch(branch: string): Promise<void> {
     await this.runner.run(
       "git",

@@ -373,6 +373,7 @@
         <a href="#github-conventions">GitHub Conventions</a>
         <a href="#validate">Validate</a>
         <a href="#merge">Merge</a>
+        <a href="#tui">TUI</a>
         <a href="#codex-and-sandcastle">Codex And Sandcastle</a>
         <a href="#troubleshooting">Troubleshooting</a>
         <a href="#development">Development</a>
@@ -552,6 +553,29 @@ agent-train init --cwd /path/to/repo</code></pre>
           </p>
         </section>
 
+        <section id="tui">
+          <h2>TUI</h2>
+          <pre><code>agent-train tui --cwd /path/to/repo --repo OWNER/REPO</code></pre>
+          <p>
+            <code>tui</code> opens an interactive terminal dashboard for
+            operating the same validate and merge workflows. It shows the
+            configured repository and target branch, runtime readiness
+            diagnostics, open PR train layers, validation state, draft status,
+            blockers, and recent workflow events.
+          </p>
+          <p>
+            Actions include refreshing the train, running preflight, validating,
+            merging, and quitting. Validate and merge require explicit
+            confirmation because validation can repair and push branches or post
+            GitHub reviews/comments, and merge can squash PRs.
+          </p>
+          <p>
+            The TUI requires an interactive terminal. In CI, piped output, or
+            other non-TTY environments, use <code>agent-train validate</code> or
+            <code>agent-train merge</code> directly.
+          </p>
+        </section>
+
         <section id="codex-and-sandcastle">
           <h2>Codex And Sandcastle Setup</h2>
           <pre><code>mkdir -p .sandcastle/codex-home
@@ -586,6 +610,11 @@ docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .</code></pre>
             </li>
             <li>
               Setup branch looks stale: rerun <code>agent-train init</code>.
+            </li>
+            <li>
+              <code>agent-train tui</code> refuses to start: run it from an
+              interactive terminal, or use <code>agent-train validate</code> or
+              <code>agent-train merge</code> for non-interactive automation.
             </li>
           </ul>
         </section>

@@ -49,6 +49,45 @@ describe("merge command", () => {
     expect(validatedPulls).toEqual([[117]]);
   });
 
+  test("restacks a frontier PR from a closed base branch onto the target before validation", async () => {
+    const staleBase = pullRequest({
+      number: 117,
+      headRefName: "feature",
+      baseRefName: "merged-base",
+      baseRefOid: "old-base-sha",
+    });
+    const retargeted = pullRequest({
+      ...staleBase,
+      baseRefName: "main",
+      baseRefOid: "main-sha",
+      headRefOid: "rebased-head",
+    });
+    const validated = validatedPullRequest({
+      ...retargeted,
+      headRefOid: "rebased-head",
+    });
+    const calls: string[] = [];
+    const validatedPulls: number[][] = [];
+
+    await executeMerge(
+      { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+      {
+        github: githubSequence(
+          [[staleBase], [retargeted], [validated], []],
+          calls
+        ),
+        git: gitClient(calls),
+        validatePullRequests: async (pullNumbers) => {
+          validatedPulls.push([...pullNumbers]);
+        },
+      }
+    );
+
+    expect(calls).toContain("recreate:feature:main:old-base-sha");
+    expect(calls).toContain("edit-base:117:main");
+    expect(validatedPulls).toEqual([[117]]);
+  });
+
   test("revalidates stale validation markers before merging", async () => {
     const stale = pullRequest({
       number: 12,
@@ -75,6 +114,26 @@ describe("merge command", () => {
     expect(validatedPulls).toEqual([[12]]);
   });
 
+  test("accepts validation markers from recent reviews when latestReviews is empty", async () => {
+    const validated = reviewOnlyValidatedPullRequest({ number: 118 });
+    const calls: string[] = [];
+    const validatedPulls: number[][] = [];
+
+    await executeMerge(
+      { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+      {
+        github: githubSequence([[validated], []], calls),
+        git: gitClient(calls),
+        validatePullRequests: async (pullNumbers) => {
+          validatedPulls.push([...pullNumbers]);
+        },
+      }
+    );
+
+    expect(validatedPulls).toEqual([]);
+    expect(calls).toContain("merge:118");
+  });
+
   test("stops when validation repair still leaves blocking findings", async () => {
     const blocked = validatedPullRequest({
       number: 33,
@@ -93,8 +152,8 @@ describe("merge command", () => {
           },
         }
       )
-    ).rejects.toThrow("PR #33 has 2 blocking agent validation finding(s).");
-    expect(validatedPulls).toEqual([[33]]);
+    ).rejects.toThrow("Validation repair reached 6 attempt(s)");
+    expect(validatedPulls).toEqual([[33], [33], [33], [33], [33], [33]]);
   });
 
   test("repairs failing GitHub Actions checks, waits, revalidates, and merges", async () => {
@@ -131,7 +190,7 @@ describe("merge command", () => {
         agent: agentRunner({
           repairCiFailure: async (input) => {
             ciEvidence.push([...input.checkEvidence]);
-            return outcome({ branch: input.branch, commits: ["fix-ci"] });
+            return outcome({ branch: input.branch, commits: ["head-2"] });
           },
         }),
         validatePullRequests: async (pullNumbers) => {
@@ -217,9 +276,13 @@ describe("merge command", () => {
   test("repairs merge-state blockers until the PR becomes mergeable", async () => {
     const dirty = validatedPullRequest({
       number: 66,
+      headRefOid: "head-1",
       mergeStateStatus: "DIRTY",
     });
-    const mergeable = validatedPullRequest({ number: 66 });
+    const mergeable = validatedPullRequest({
+      number: 66,
+      headRefOid: "head-2",
+    });
     const mergeStates: string[] = [];
     const validatedPulls: number[][] = [];
 
@@ -233,7 +296,7 @@ describe("merge command", () => {
         agent: agentRunner({
           repairMergeState: async (input) => {
             mergeStates.push(input.mergeState);
-            return outcome({ branch: input.branch, commits: ["fix-merge"] });
+            return outcome({ branch: input.branch, commits: ["head-2"] });
           },
         }),
         validatePullRequests: async (pullNumbers) => {
@@ -278,6 +341,7 @@ describe("merge command", () => {
           calls,
           {
             comments,
+            getPullRequests: [dirtyHead2, ciFailHead3, greenHead4],
             checkEvidence: [
               {
                 name: "check",
@@ -295,11 +359,14 @@ describe("merge command", () => {
         agent: agentRunner({
           repairCiFailure: async (input) => {
             repairKinds.push(`ci:${input.prNumber}`);
-            return outcome({ branch: input.branch, commits: ["fix-ci"] });
+            return outcome({
+              branch: input.branch,
+              commits: [repairKinds.length === 1 ? "head-2" : "head-4"],
+            });
           },
           repairMergeState: async (input) => {
             repairKinds.push(`merge-state:${input.prNumber}`);
-            return outcome({ branch: input.branch, commits: ["fix-merge"] });
+            return outcome({ branch: input.branch, commits: ["head-3"] });
           },
         }),
         validatePullRequests: async () => {},
@@ -348,7 +415,7 @@ describe("merge command", () => {
           agent: agentRunner({
             repairMergeState: async (input) => {
               repairAttempts.push(input.prNumber);
-              return outcome({ branch: input.branch, commits: ["still"] });
+              return outcome({ branch: input.branch, commits: ["head-88"] });
             },
           }),
           validatePullRequests: async () => {},
@@ -376,6 +443,26 @@ function validationReview(
       advisoryFindings: input.advisoryFindings ?? 0,
       specSkipped: input.specSkipped ?? true,
     })} -->`,
+  };
+}
+
+function reviewOnlyValidatedPullRequest(
+  input: Partial<PullRequest> & {
+    readonly validation?: {
+      readonly blockingFindings?: number;
+      readonly advisoryFindings?: number;
+    };
+  }
+): PullRequest {
+  const pr = pullRequest(input);
+  return {
+    ...pr,
+    reviews: [
+      validationReview(pr.headRefOid, {
+        blockingFindings: input.validation?.blockingFindings,
+        advisoryFindings: input.validation?.advisoryFindings,
+      }),
+    ],
   };
 }
 
@@ -416,11 +503,16 @@ function githubSequence(
   options: {
     readonly checkEvidence?: readonly PullRequestCheckEvidence[];
     readonly comments?: string[];
+    readonly getPullRequests?: readonly PullRequest[];
     readonly waitForChecks?: PullRequest | readonly PullRequest[];
   } = {}
 ): GitHubClient {
   let listCalls = 0;
+  let getCalls = 0;
   let waitCalls = 0;
+  const lastNonEmptyPull =
+    [...pulls].reverse().find((items) => items.length > 0)?.[0] ??
+    pullRequest({});
   return {
     listOpenPullRequests: async () => {
       calls.push("list");
@@ -428,8 +520,24 @@ function githubSequence(
       listCalls += 1;
       return [...(pulls[index] ?? [])];
     },
+    getPullRequest: async (_repo: string, pullNumber: number) => {
+      calls.push(`get:${pullNumber}`);
+      if (options.getPullRequests) {
+        const index = Math.min(getCalls, options.getPullRequests.length - 1);
+        getCalls += 1;
+        return options.getPullRequests[index] ?? lastNonEmptyPull;
+      }
+      return lastNonEmptyPull;
+    },
     markPullRequestReady: async (_repo: string, pullNumber: number) => {
       calls.push(`ready:${pullNumber}`);
+    },
+    editPullRequestBase: async (
+      _repo: string,
+      pullNumber: number,
+      baseBranch: string
+    ) => {
+      calls.push(`edit-base:${pullNumber}:${baseBranch}`);
     },
     getPullRequestCheckEvidence: async () => [...(options.checkEvidence ?? [])],
     waitForPullRequestChecks: async (_repo: string, pullNumber: number) => {
@@ -469,6 +577,26 @@ function gitClient(calls: string[] = []): GitClient {
     },
     deleteRemoteBranch: async (branch: string) => {
       calls.push(`delete:${branch}`);
+    },
+    rebaseBranchOntoBase: async (input: {
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly oldBaseAnchorSha?: string;
+    }) => {
+      calls.push(
+        `rebase:${input.branch}:${input.baseBranch}:${input.oldBaseAnchorSha ?? ""}`
+      );
+      return "next-base-sha";
+    },
+    recreateBranchFromBaseDiff: async (input: {
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly diffBaseRef: string;
+    }) => {
+      calls.push(
+        `recreate:${input.branch}:${input.baseBranch}:${input.diffBaseRef}`
+      );
+      return "next-base-sha";
     },
   } as unknown as GitClient;
 }

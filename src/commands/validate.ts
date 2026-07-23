@@ -17,6 +17,9 @@ import {
   summarizePullRequest,
 } from "@/validation-context.js";
 
+const POST_REPAIR_HEAD_REFRESH_ATTEMPTS = 10;
+const POST_REPAIR_HEAD_REFRESH_INTERVAL_MS = 2_000;
+
 export interface ValidateInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
@@ -123,7 +126,12 @@ export async function executeValidate(
         if (outcome.commits.length > 0) {
           repaired = true;
           await gitMutate(() => deps.git.pushBranch(pr.headRefName));
-          pr = await deps.github.getPullRequest(input.config.repo, pr.number);
+          pr = await refreshPullRequestAfterRepair(
+            input,
+            deps,
+            pr.number,
+            outcome.commits.at(-1)
+          );
           diff = await deps.github.getPullRequestDiff(
             input.config.repo,
             pr.number
@@ -195,6 +203,37 @@ export async function executeValidate(
     pullRequests,
     issues,
   };
+}
+
+async function refreshPullRequestAfterRepair(
+  input: ValidateInput,
+  deps: ValidateDeps,
+  pullNumber: number,
+  expectedHeadRefOid: string | undefined
+): Promise<PullRequest> {
+  let pr = await deps.github.getPullRequest(input.config.repo, pullNumber);
+  if (!expectedHeadRefOid || pr.headRefOid === expectedHeadRefOid) return pr;
+
+  for (
+    let attempt = 1;
+    attempt < POST_REPAIR_HEAD_REFRESH_ATTEMPTS;
+    attempt++
+  ) {
+    deps.log?.(
+      `Waiting for PR #${pullNumber} head to update from ${shortSha(
+        pr.headRefOid
+      )} to ${shortSha(expectedHeadRefOid)}`
+    );
+    await Bun.sleep(POST_REPAIR_HEAD_REFRESH_INTERVAL_MS);
+    pr = await deps.github.getPullRequest(input.config.repo, pullNumber);
+    if (pr.headRefOid === expectedHeadRefOid) return pr;
+  }
+
+  throw new Error(
+    `PR #${pullNumber} still reports head ${shortSha(
+      pr.headRefOid
+    )} after repair pushed ${shortSha(expectedHeadRefOid)}.`
+  );
 }
 
 async function collectFindings(
@@ -473,4 +512,8 @@ function pullRequestMarkdownLink(
   pr: Pick<PullRequest, "number" | "url">
 ): string {
   return pr.url ? `[#${pr.number}](${pr.url})` : `#${pr.number}`;
+}
+
+function shortSha(value: string): string {
+  return value.slice(0, 7);
 }

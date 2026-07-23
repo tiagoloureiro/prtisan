@@ -8,6 +8,7 @@ import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
 import { assertRuntimeReady } from "./preflight.js";
 import { pruneRuntimeArtifacts } from "./retention.js";
+import { runTui } from "./tui/index.js";
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const parsed = parseCliArgs(argv);
@@ -15,11 +16,23 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     printHelp();
     return parsed.command ? 0 : 1;
   }
-  if (!["init", "validate", "merge"].includes(parsed.command)) {
+  if (!["init", "validate", "merge", "tui"].includes(parsed.command)) {
     throw new Error(`Unknown command: ${parsed.command}`);
   }
 
   const cwd = parsed.options.cwd ?? Bun.env.PWD ?? ".";
+
+  if (parsed.command === "tui") {
+    return runTui({
+      cwd,
+      configPath: parsed.options.config,
+      repo: parsed.options.repo,
+      targetBranch: parsed.options.targetBranch,
+      repair: parsed.options.repair,
+      validateAffected: parsed.options.validateAffected,
+    });
+  }
+
   const runner = new BunCommandRunner();
   const github = new GitHubClient(runner, cwd);
 
@@ -193,5 +206,6 @@ Usage:
   agent-train init [--cwd <repo>] [--repo OWNER/REPO] [--target-branch <branch>] [--branch <branch>] [--remote <name>] [--force]
   agent-train validate [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-repair]
   agent-train merge [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-validate-affected]
+  agent-train tui [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--target-branch <branch>]
 `);
 }

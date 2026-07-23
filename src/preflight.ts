@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { CommandRunner } from "./exec.js";
 import type { GitHubClient } from "./github.js";
 import { resolvePath } from "./path.js";
@@ -59,15 +61,23 @@ export async function checkRuntimeReadiness(input: {
     diagnostics.push(await githubDiagnostic(input.github));
   }
 
-  diagnostics.push(
-    await commandDiagnostic(
-      input.runner,
-      "Docker image",
-      "docker",
-      ["image", "inspect", input.config.docker.imageName],
-      input.cwd
-    )
+  const imageDiagnostic = await commandDiagnostic(
+    input.runner,
+    "Docker image",
+    "docker",
+    ["image", "inspect", input.config.docker.imageName],
+    input.cwd
   );
+  diagnostics.push(imageDiagnostic);
+  if (imageDiagnostic.status === "ok") {
+    diagnostics.push(
+      await dockerImageDefaultCommandDiagnostic(
+        input.runner,
+        input.config,
+        input.cwd
+      )
+    );
+  }
 
   const codexHome = resolvePath(input.cwd, input.config.docker.codexHome);
   const codexHomeCheck = await input.runner.run("test", ["-d", codexHome], {
@@ -130,6 +140,105 @@ async function commandDiagnostic(
         : (result.stderr || result.stdout).trim() ||
           `${command} ${args.join(" ")} failed`,
   };
+}
+
+async function dockerImageDefaultCommandDiagnostic(
+  runner: CommandRunner,
+  config: AgentTrainConfig,
+  cwd: string
+): Promise<RuntimeReadinessDiagnostic> {
+  const containerName = `agent-train-preflight-${randomUUID()}`;
+  const imageName = config.docker.imageName;
+  const run = await runner.run(
+    "docker",
+    [
+      "run",
+      "-d",
+      "--name",
+      containerName,
+      "-e",
+      "HOME=/home/agent",
+      "--user",
+      `${runtimeUid()}:${runtimeGid()}`,
+      imageName,
+    ],
+    { cwd }
+  );
+  if (run.exitCode !== 0) {
+    return {
+      name: "Docker image default command",
+      status: "failed",
+      details:
+        (run.stderr || run.stdout).trim() ||
+        `docker run -d ${imageName} failed`,
+    };
+  }
+
+  await waitForContainerExitRace();
+  const inspect = await runner.run(
+    "docker",
+    ["inspect", "--format", "{{.State.Running}}", containerName],
+    { cwd }
+  );
+
+  if (inspect.exitCode === 0 && inspect.stdout.trim() === "true") {
+    const gitConfig = await runner.run(
+      "docker",
+      [
+        "exec",
+        containerName,
+        "git",
+        "config",
+        "--global",
+        "--add",
+        "safe.directory",
+        "/home/agent/workspace",
+      ],
+      { cwd }
+    );
+    await runner.run("docker", ["rm", "-f", containerName], { cwd });
+    if (gitConfig.exitCode !== 0) {
+      return {
+        name: "Docker image default command",
+        status: "failed",
+        details:
+          (gitConfig.stderr || gitConfig.stdout).trim() ||
+          "Docker image cannot write global Git config under /home/agent.",
+      };
+    }
+
+    return {
+      name: "Docker image default command",
+      status: "ok",
+      details: `${imageName} stays running and can write Git config under /home/agent.`,
+    };
+  }
+
+  await runner.run("docker", ["rm", "-f", containerName], { cwd });
+
+  return {
+    name: "Docker image default command",
+    status: "failed",
+    details: [
+      `${imageName} exits before Sandcastle can run docker exec.`,
+      'Update the scaffolded Dockerfile to use CMD ["sleep", "infinity"], then rebuild the image.',
+      (inspect.stderr || inspect.stdout).trim(),
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
+async function waitForContainerExitRace(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 250));
+}
+
+function runtimeUid(): number {
+  return process.getuid?.() ?? 1000;
+}
+
+function runtimeGid(): number {
+  return process.getgid?.() ?? 1000;
 }
 
 async function githubDiagnostic(

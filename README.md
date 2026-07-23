@@ -10,9 +10,10 @@ Canonical documentation is available as a [GitHub Pages site](https://tiagoloure
 bun run init --cwd /path/to/repo
 bun run validate --cwd /path/to/repo --repo owner/repo
 bun run merge --cwd /path/to/repo --repo owner/repo
+bun run tui --cwd /path/to/repo --repo owner/repo
 ```
 
-Bare `bun init` is Bun's package initializer, so `agent-train` uses package scripts for local development. After `bun run build`, the binary entrypoint is `agent-train init`, `agent-train validate`, and `agent-train merge`.
+Bare `bun init` is Bun's package initializer, so `agent-train` uses package scripts for local development. After `bun run build`, the binary entrypoint is `agent-train init`, `agent-train validate`, `agent-train merge`, and `agent-train tui`.
 
 `init` creates the target repo scaffold:
 
@@ -22,6 +23,8 @@ Bare `bun init` is Bun's package initializer, so `agent-train` uses package scri
 `validate` loads all open PRs in the repo, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking PR findings, and posts a GitHub PR review marker tied to the current PR head SHA. It also loads all open issues, validates the target branch against each issue's spec, posts issue comments with the main-branch result, and creates or updates an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and no associated PR is open.
 
 `merge` reloads all open PRs from GitHub, processes them in topological order, marks draft PRs ready when it reaches them, validates or revalidates the current PR when needed, attempts CI and merge-state repair, squash-merges only after GitHub is green/mergeable with `--match-head-commit`, restacks descendants, and revalidates affected PRs.
+
+`tui` opens an interactive terminal dashboard for the same train. It shows preflight status, open PR layers, validation state, blockers, and a live log. Validate and merge actions require explicit confirmation because they can mutate branches and GitHub state. In non-interactive terminals, use `validate` or `merge` directly.
 
 ## Requirements
 

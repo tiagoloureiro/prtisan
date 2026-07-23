@@ -174,6 +174,50 @@ describe("validate command", () => {
     });
   });
 
+  test("posts repair follow-up validation against the pushed repair head", async () => {
+    const originalPr = pullRequest({
+      number: 12,
+      headRefName: "feature",
+      headRefOid: "old-head",
+    });
+    const repairedPr = pullRequest({
+      ...originalPr,
+      headRefOid: "repair-sha",
+    });
+    const gitCalls: string[] = [];
+    let getPullRequestCalls = 0;
+    let postedReview: PullRequestReviewInput | undefined;
+
+    const github = {
+      listOpenPullRequests: async () => [originalPr],
+      listOpenIssues: async () => [],
+      getPullRequest: async () => {
+        getPullRequestCalls += 1;
+        return getPullRequestCalls === 1 ? originalPr : repairedPr;
+      },
+      getPullRequestDiff: async () => "diff --git a/a.ts b/a.ts",
+      createPullRequestReview: async (input: PullRequestReviewInput) => {
+        postedReview = input;
+      },
+    } as unknown as GitHubClient;
+
+    await executeValidate(
+      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
+      {
+        github,
+        git: gitClient(gitCalls),
+        agent: fakeAgent({
+          pullRequestFindings: [[blockingSpecFinding], []],
+          repairPullRequestCommits: ["repair-sha"],
+        }),
+      }
+    );
+
+    expect(gitCalls).toContain("push:feature");
+    expect(postedReview?.commitId).toBe("repair-sha");
+    expect(postedReview?.body).toContain('"headRefOid":"repair-sha"');
+  });
+
   test("does not create a duplicate repair PR when main has blocking gaps but an associated PR is open", async () => {
     const primaryIssue = issue({ number: 30, title: "Spec" });
     const pr = pullRequest({
@@ -341,7 +385,9 @@ function gitClient(calls: string[] = []): GitClient {
 function fakeAgent(
   options: {
     readonly issueBranchFindings?: readonly ReviewFinding[];
+    readonly pullRequestFindings?: readonly (readonly ReviewFinding[])[];
     readonly repairIssueCommits?: readonly string[];
+    readonly repairPullRequestCommits?: readonly string[];
     readonly onReviewPullRequest?: (
       input: Extract<
         Parameters<AgentRunner["review"]>[0],
@@ -362,11 +408,15 @@ function fakeAgent(
     ) => void;
   } = {}
 ): AgentRunner {
+  let pullRequestReviewCalls = 0;
   return {
     review: async (input) => {
       if (input.kind === "pull-request") {
+        const findings =
+          options.pullRequestFindings?.[pullRequestReviewCalls] ?? [];
+        pullRequestReviewCalls += 1;
         options.onReviewPullRequest?.(input);
-        return { axis: input.axis, summary: "", findings: [] };
+        return { axis: input.axis, summary: "", findings };
       }
 
       options.onReviewIssueBranch?.(input);
@@ -388,7 +438,7 @@ function fakeAgent(
 
       return {
         branch: input.branch,
-        commits: [],
+        commits: options.repairPullRequestCommits ?? [],
         stdout: "",
       };
     },
