@@ -293,9 +293,6 @@ export class SandcastleCodexRunner implements AgentRunner {
         imageName: input.config.docker.imageName,
         mounts,
         cpus: input.config.docker.cpus,
-        env: {
-          CODEX_HOME: SANDBOX_CODEX_HOME,
-        },
       }),
       agent: sandcastle.codex(input.model, {
         effort: input.effort,
