@@ -1,204 +1,206 @@
+import { runIdFromDate, syntheticBaseBranch } from "@/branching.js";
 import { GitClient } from "@/git.js";
 import { GitHubClient, isPullRequestGreen } from "@/github.js";
-import { buildIssueGraph, descendantsOf, planBranches } from "@/graph.js";
-import { buildPullRequestBody } from "@/pr-body.js";
 import {
-  loadTrainState,
-  saveTrainState,
-  updateIssueRecord,
-  updateSyntheticBase,
-} from "@/state.js";
-import type {
-  AgentTrainConfig,
-  IssueTrainRecord,
-  TrainState,
-} from "@/types.js";
-
-import { selectedIssuesFromState } from "./create-prs.js";
+  descendantsOfOpenPr,
+  loadOpenPrGraph,
+  type OpenPrGraph,
+  type OpenPrNode,
+} from "@/open-pr-graph.js";
+import type { AgentTrainConfig, PullRequest } from "@/types.js";
 
 export interface MergeInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
-  readonly trainId: string;
   readonly validateAffected?: boolean;
+  readonly runId?: string;
 }
 
 export interface MergeDeps {
   readonly github: GitHubClient;
   readonly git: GitClient;
-  readonly validateIssues?: (issueNumbers: readonly number[]) => Promise<void>;
+  readonly validatePullRequests?: (
+    pullNumbers: readonly number[]
+  ) => Promise<void>;
   readonly log?: (message: string) => void;
+}
+
+export interface MergedPullRequest {
+  readonly number: number;
+  readonly url: string;
+  readonly headRefName: string;
+  readonly headRefOid: string;
+}
+
+export interface MergeResult {
+  readonly repo: string;
+  readonly merged: readonly MergedPullRequest[];
 }
 
 export async function executeMerge(
   input: MergeInput,
   deps: MergeDeps
-): Promise<TrainState> {
-  let state = await loadTrainState(input.cwd, input.trainId);
-  const graph = buildIssueGraph(selectedIssuesFromState(state));
+): Promise<MergeResult> {
+  const runId = input.runId ?? runIdFromDate("merge");
+  const merged: MergedPullRequest[] = [];
+  let graph = await loadCurrentGraph(input, deps);
 
-  for (const issueNumber of graph.topologicalOrder) {
-    const record = state.issues[String(issueNumber)];
-    if (!record || record.status === "merged") continue;
-    if (!record.pr) {
-      throw new Error(`Issue #${issueNumber} has no PR yet.`);
-    }
-    if (!record.validation || record.validation.blockingFindings > 0) {
-      throw new Error(`Issue #${issueNumber} is not validated cleanly.`);
-    }
+  while (graph.topologicalOrder.length > 0) {
+    const prNumber = graph.topologicalOrder[0] as number;
+    const node = graph.nodes.get(prNumber);
+    if (!node) break;
 
-    const pr = await deps.github.getPullRequest(
-      input.config.repo,
-      record.pr.number
-    );
-    const green = isPullRequestGreen(pr);
-    if (!green.ok) {
-      throw new Error(green.reason);
-    }
+    assertReadyToMerge(node);
 
-    deps.log?.(`Squash-merging PR #${pr.number} for issue #${issueNumber}`);
+    deps.log?.(`Squash-merging PR #${node.pr.number}`);
     await deps.github.mergePullRequest(
       input.config.repo,
-      pr.number,
-      pr.headRefOid,
+      node.pr.number,
+      node.pr.headRefOid,
       "squash"
     );
     const mergedPr = await deps.github.waitForPullRequestMerged(
       input.config.repo,
-      pr.number
+      node.pr.number
     );
-    state = updateIssueRecord(state, issueNumber, {
-      status: "merged",
-      pr: {
-        number: mergedPr.number,
-        url: mergedPr.url,
-        headRefName: mergedPr.headRefName,
-        baseRefName: mergedPr.baseRefName,
-        headRefOid: mergedPr.headRefOid,
-      },
+    merged.push({
+      number: mergedPr.number,
+      url: mergedPr.url,
+      headRefName: mergedPr.headRefName,
+      headRefOid: mergedPr.headRefOid,
     });
-    await saveTrainState(input.cwd, state);
 
-    const affected = descendantsOf(graph, issueNumber).filter((descendant) => {
-      const descendantRecord = state.issues[String(descendant)];
-      return descendantRecord && descendantRecord.status !== "merged";
-    });
+    const affectedFromPreviousGraph = descendantsOfOpenPr(
+      graph,
+      node.pr.number
+    );
+    graph = await loadCurrentGraph(input, deps);
+    const affected = affectedFromPreviousGraph.filter((affectedPr) =>
+      graph.nodes.has(affectedPr)
+    );
 
     if (affected.length > 0) {
-      state = await restackDescendants(input, deps, state, affected);
-      await saveTrainState(input.cwd, state);
-
+      await restackDescendants(input, deps, graph, affected, runId);
       if (input.validateAffected ?? true) {
-        await deps.validateIssues?.(affected);
-        state = await loadTrainState(input.cwd, input.trainId);
+        await deps.validatePullRequests?.(affected);
       }
     }
+
+    await deps.git.deleteRemoteBranch(node.pr.headRefName);
+    await deps.git.deleteRemoteBranch(syntheticBaseBranch(node.pr.number));
+    await cleanupObsoleteSyntheticBranches(input, deps);
+    graph = await loadCurrentGraph(input, deps);
   }
 
-  await cleanupMergedBranches(input, deps, state);
-  return state;
+  return {
+    repo: input.config.repo,
+    merged,
+  };
+}
+
+async function loadCurrentGraph(
+  input: MergeInput,
+  deps: MergeDeps
+): Promise<OpenPrGraph> {
+  return loadOpenPrGraph({
+    github: deps.github,
+    repo: input.config.repo,
+    targetBranch: input.config.targetBranch,
+    concurrency: input.config.concurrency.github,
+  });
+}
+
+function assertReadyToMerge(node: OpenPrNode): void {
+  const validation = node.validation;
+  if (validation.state === "missing") {
+    throw new Error(
+      `PR #${node.pr.number} has no agent-train validation review yet.`
+    );
+  }
+  if (validation.state === "blocked") {
+    throw new Error(
+      `PR #${node.pr.number} has ${validation.blockingFindings} blocking agent validation finding(s).`
+    );
+  }
+
+  const green = isPullRequestGreen(node.pr);
+  if (!green.ok) {
+    throw new Error(green.reason);
+  }
 }
 
 async function restackDescendants(
   input: MergeInput,
   deps: MergeDeps,
-  state: TrainState,
-  affected: readonly number[]
-): Promise<TrainState> {
-  const graph = buildIssueGraph(selectedIssuesFromState(state));
-  const branchPlan = planBranches(graph, input.config, input.trainId);
-  let nextState = state;
+  graph: OpenPrGraph,
+  affected: readonly number[],
+  runId: string
+): Promise<void> {
+  const affectedSet = new Set(affected);
+  const ordered = graph.topologicalOrder
+    .map((prNumber) => graph.nodes.get(prNumber))
+    .filter((node): node is OpenPrNode =>
+      Boolean(node && affectedSet.has(node.pr.number))
+    );
 
-  for (const issueNumber of affected) {
-    const record = nextState.issues[String(issueNumber)];
-    const planned = branchPlan.issues.get(issueNumber);
-    if (!record || !planned || record.status === "merged") continue;
+  for (const node of ordered) {
+    const openBlockerBranches = node.blockers
+      .map((blocker) => graph.nodes.get(blocker)?.pr.headRefName)
+      .filter((branch): branch is string => Boolean(branch));
+    const nextBase = nextBaseBranch(input.config, node.pr, openBlockerBranches);
 
-    const openBlockerBranches = planned.blockers
-      .map((blocker) => nextState.issues[String(blocker)])
-      .filter(
-        (blockerRecord): blockerRecord is IssueTrainRecord =>
-          Boolean(blockerRecord) && blockerRecord.status !== "merged"
-      )
-      .map((blockerRecord) => blockerRecord.branch);
-
-    const nextBase =
-      openBlockerBranches.length === 0
-        ? input.config.targetBranch
-        : openBlockerBranches.length === 1
-          ? openBlockerBranches[0]!
-          : planned.syntheticBase!;
-
-    if (planned.syntheticBase && openBlockerBranches.length > 1) {
+    if (openBlockerBranches.length > 1) {
       await deps.git.createSyntheticBaseBranch({
-        trainId: input.trainId,
-        issueNumber,
-        syntheticBranch: planned.syntheticBase,
+        runId,
+        label: `base-pr-${node.pr.number}`,
+        syntheticBranch: nextBase,
         blockerBranches: openBlockerBranches,
       });
-      nextState = updateSyntheticBase(nextState, issueNumber, {
-        branch: planned.syntheticBase,
-        blockers: planned.blockers,
-        status: "created",
-      });
-    } else if (planned.syntheticBase) {
-      nextState = updateSyntheticBase(nextState, issueNumber, {
-        status: "obsolete",
-      });
     }
 
-    const baseAnchorSha = await deps.git.rebaseBranchOntoBase({
-      trainId: input.trainId,
-      issueNumber,
-      branch: record.branch,
+    const nextBaseAnchorSha = await deps.git.rebaseBranchOntoBase({
+      runId,
+      label: `restack-pr-${node.pr.number}`,
+      branch: node.pr.headRefName,
       baseBranch: nextBase,
-      oldBaseAnchorSha: record.baseAnchorSha,
+      oldBaseAnchorSha: node.pr.baseRefOid || undefined,
     });
 
-    if (record.pr && record.baseBranch !== nextBase) {
+    if (node.pr.baseRefName !== nextBase) {
       await deps.github.editPullRequestBase(
         input.config.repo,
-        record.pr.number,
+        node.pr.number,
         nextBase
       );
-    }
-
-    nextState = updateIssueRecord(nextState, issueNumber, {
-      baseBranch: nextBase,
-      baseAnchorSha,
-      syntheticBase:
-        openBlockerBranches.length > 1 ? planned.syntheticBase : undefined,
-      pr: record.pr ? { ...record.pr, baseRefName: nextBase } : undefined,
-      validation: undefined,
-      status: record.status === "validated" ? "pr_opened" : record.status,
-    });
-    const updatedRecord = nextState.issues[String(issueNumber)]!;
-    if (updatedRecord.pr) {
-      await deps.github.editPullRequestBody(
-        input.config.repo,
-        updatedRecord.pr.number,
-        buildPullRequestBody(updatedRecord, input.trainId)
+      deps.log?.(
+        `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${nextBase} at ${nextBaseAnchorSha}`
       );
     }
   }
-
-  return nextState;
 }
 
-async function cleanupMergedBranches(
-  input: MergeInput,
-  deps: MergeDeps,
-  state: TrainState
-): Promise<void> {
-  for (const record of Object.values(state.issues)) {
-    if (record.status === "merged") {
-      await deps.git.deleteRemoteBranch(record.branch);
-    }
-  }
+function nextBaseBranch(
+  config: AgentTrainConfig,
+  pr: PullRequest,
+  openBlockerBranches: readonly string[]
+): string {
+  if (openBlockerBranches.length === 0) return config.targetBranch;
+  if (openBlockerBranches.length === 1) return openBlockerBranches[0] as string;
+  return syntheticBaseBranch(pr.number);
+}
 
-  for (const synthetic of Object.values(state.syntheticBases)) {
-    if (synthetic.status === "obsolete") {
-      await deps.git.deleteRemoteBranch(synthetic.branch);
+async function cleanupObsoleteSyntheticBranches(
+  input: MergeInput,
+  deps: MergeDeps
+): Promise<void> {
+  const graph = await loadCurrentGraph(input, deps);
+  const liveBases = new Set(
+    [...graph.nodes.values()].map((node) => node.pr.baseRefName)
+  );
+  for (const node of graph.nodes.values()) {
+    const synthetic = syntheticBaseBranch(node.pr.number);
+    if (!liveBases.has(synthetic)) {
+      await deps.git.deleteRemoteBranch(synthetic);
     }
   }
 }

@@ -3,11 +3,7 @@ import { z } from "zod";
 import { reviewSandboxBranch } from "./branching.js";
 import { ensureDir, pathExists, readText, writeText } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
-import {
-  buildImplementPrompt,
-  buildRepairPrompt,
-  buildReviewPrompt,
-} from "./prompts.js";
+import { buildRepairPrompt, buildReviewPrompt } from "./prompts.js";
 import type {
   AgentRunOutcome,
   AgentTrainConfig,
@@ -36,22 +32,11 @@ const ReviewOutputSchema = z.object({
     .default([]),
 });
 
-export interface ImplementIssueInput {
-  readonly cwd: string;
-  readonly config: AgentTrainConfig;
-  readonly trainId: string;
-  readonly issue: Issue;
-  readonly relatedIssues: readonly Issue[];
-  readonly targetBranch: string;
-  readonly baseBranch: string;
-  readonly branch: string;
-}
-
 export interface ReviewPullRequestInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
-  readonly trainId: string;
-  readonly issue: Issue;
+  readonly runId: string;
+  readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
   readonly prNumber: number;
   readonly branch: string;
@@ -63,49 +48,29 @@ export interface ReviewPullRequestInput {
 export interface RepairPullRequestInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
-  readonly trainId: string;
-  readonly issue: Issue;
+  readonly runId: string;
+  readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
+  readonly prNumber: number;
   readonly branch: string;
   readonly baseBranch: string;
   readonly findings: readonly ReviewFinding[];
 }
 
 export interface AgentRunner {
-  implementIssue(input: ImplementIssueInput): Promise<AgentRunOutcome>;
   reviewPullRequest(input: ReviewPullRequestInput): Promise<ReviewReport>;
   repairPullRequest(input: RepairPullRequestInput): Promise<AgentRunOutcome>;
 }
 
 export class SandcastleCodexRunner implements AgentRunner {
-  async implementIssue(input: ImplementIssueInput): Promise<AgentRunOutcome> {
-    return this.runCodex({
-      cwd: input.cwd,
-      config: input.config,
-      trainId: input.trainId,
-      branch: input.branch,
-      baseBranch: input.baseBranch,
-      name: `implement-${input.issue.number}`,
-      model: input.config.models.implementation,
-      effort: input.config.reasoning.implementation,
-      prompt: buildImplementPrompt(input),
-      maxIterations: 5,
-    });
-  }
-
   async reviewPullRequest(
     input: ReviewPullRequestInput
   ): Promise<ReviewReport> {
     const result = await this.runCodex({
       cwd: input.cwd,
       config: input.config,
-      trainId: input.trainId,
-      branch: reviewSandboxBranch(
-        input.config,
-        input.trainId,
-        input.prNumber,
-        input.axis
-      ),
+      runId: input.runId,
+      branch: reviewSandboxBranch(input.prNumber, input.axis),
       baseBranch: input.branch,
       name: `review-${input.axis}-${input.prNumber}`,
       model: input.config.models.review,
@@ -131,10 +96,10 @@ export class SandcastleCodexRunner implements AgentRunner {
     return this.runCodex({
       cwd: input.cwd,
       config: input.config,
-      trainId: input.trainId,
+      runId: input.runId,
       branch: input.branch,
       baseBranch: input.baseBranch,
-      name: `repair-${input.issue.number}`,
+      name: `repair-${input.prNumber}`,
       model: input.config.models.repair,
       effort: input.config.reasoning.repair,
       prompt: buildRepairPrompt(input),
@@ -145,7 +110,7 @@ export class SandcastleCodexRunner implements AgentRunner {
   private async runCodex(input: {
     readonly cwd: string;
     readonly config: AgentTrainConfig;
-    readonly trainId: string;
+    readonly runId: string;
     readonly branch: string;
     readonly baseBranch: string;
     readonly name: string;
@@ -163,13 +128,13 @@ export class SandcastleCodexRunner implements AgentRunner {
     const logPath = joinPath(
       input.cwd,
       ".sandcastle",
-      "trains",
-      input.trainId,
+      "runs",
+      input.runId,
       "logs",
       `${input.name}-${Date.now()}.log`
     );
     await ensureDir(
-      joinPath(input.cwd, ".sandcastle", "trains", input.trainId, "logs")
+      joinPath(input.cwd, ".sandcastle", "runs", input.runId, "logs")
     );
 
     const sandcastle = await import("@ai-hero/sandcastle");
@@ -280,8 +245,8 @@ export async function prepareCodexHome(
     await writeText(
       configPath,
       [
-        `model = "${config.models.implementation}"`,
-        `model_reasoning_effort = "${config.reasoning.implementation}"`,
+        `model = "${config.models.repair}"`,
+        `model_reasoning_effort = "${config.reasoning.repair}"`,
         "",
       ].join("\n")
     );

@@ -84,18 +84,18 @@ export class GitClient {
   }
 
   async createSyntheticBaseBranch(input: {
-    readonly trainId: string;
-    readonly issueNumber: number;
+    readonly runId: string;
+    readonly label: string;
     readonly syntheticBranch: string;
     readonly blockerBranches: readonly string[];
   }): Promise<void> {
     const worktreePath = joinPath(
       this.cwd,
       ".sandcastle",
-      "trains",
-      input.trainId,
+      "runs",
+      input.runId,
       "worktrees",
-      `base-${input.issueNumber}`
+      input.label
     );
 
     await this.clearManagedWorktree(worktreePath);
@@ -161,8 +161,8 @@ export class GitClient {
   }
 
   async rebaseBranchOntoBase(input: {
-    readonly trainId: string;
-    readonly issueNumber: number;
+    readonly runId: string;
+    readonly label: string;
     readonly branch: string;
     readonly baseBranch: string;
     readonly oldBaseAnchorSha?: string;
@@ -170,10 +170,10 @@ export class GitClient {
     const worktreePath = joinPath(
       this.cwd,
       ".sandcastle",
-      "trains",
-      input.trainId,
+      "runs",
+      input.runId,
       "worktrees",
-      `restack-${input.issueNumber}`
+      input.label
     );
 
     await this.clearManagedWorktree(worktreePath);

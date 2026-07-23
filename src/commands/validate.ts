@@ -1,23 +1,18 @@
 import type { AgentRunner } from "@/agent.js";
+import { runIdFromDate } from "@/branching.js";
 import { createLimiter, mapLimit } from "@/concurrency.js";
 import { GitClient } from "@/git.js";
 import { GitHubClient } from "@/github.js";
+import { loadOpenPrGraph, type OpenPrNode } from "@/open-pr-graph.js";
 import { preparePullRequestReview } from "@/review.js";
-import { loadTrainState, saveTrainState, updateIssueRecord } from "@/state.js";
-import type {
-  AgentTrainConfig,
-  Issue,
-  IssueTrainRecord,
-  ReviewFinding,
-  TrainState,
-} from "@/types.js";
+import type { AgentTrainConfig, PullRequest, ReviewFinding } from "@/types.js";
 
 export interface ValidateInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
-  readonly trainId: string;
-  readonly issueNumbers?: readonly number[];
+  readonly pullNumbers?: readonly number[];
   readonly repair?: boolean;
+  readonly runId?: string;
 }
 
 export interface ValidateDeps {
@@ -27,191 +22,206 @@ export interface ValidateDeps {
   readonly log?: (message: string) => void;
 }
 
+export interface PullRequestValidationResult {
+  readonly pr: Pick<
+    PullRequest,
+    "number" | "url" | "headRefName" | "baseRefName" | "headRefOid"
+  >;
+  readonly issueNumber?: number;
+  readonly status: "validated" | "validation_failed";
+  readonly blockingFindings: number;
+  readonly advisoryFindings: number;
+  readonly repaired: boolean;
+  readonly specSkipped: boolean;
+  readonly reviewEvent: "COMMENT" | "REQUEST_CHANGES";
+}
+
+export interface ValidateResult {
+  readonly repo: string;
+  readonly checkedAt: string;
+  readonly pullRequests: readonly PullRequestValidationResult[];
+}
+
 export async function executeValidate(
   input: ValidateInput,
   deps: ValidateDeps
-): Promise<TrainState> {
-  let state = await loadTrainState(input.cwd, input.trainId);
+): Promise<ValidateResult> {
+  const runId = input.runId ?? runIdFromDate("validate");
+  const graph = await loadOpenPrGraph({
+    github: deps.github,
+    repo: input.config.repo,
+    targetBranch: input.config.targetBranch,
+    concurrency: input.config.concurrency.github,
+  });
+  const nodes = selectedNodes(graph, input.pullNumbers);
   const githubMutate = createLimiter(input.config.concurrency.github);
   const gitMutate = createLimiter(1);
-  const stateMutation = createLimiter(1);
-  const issueNumbers =
-    input.issueNumbers ??
-    Object.values(state.issues).map((record) => record.issue.number);
-  const wanted = new Set(issueNumbers);
-  const records = Object.values(state.issues).filter(
-    (record) =>
-      wanted.has(record.issue.number) && record.pr && record.status !== "merged"
-  );
+  const checkedAt = new Date().toISOString();
 
-  const persistIssue = async (
-    issueNumber: number,
-    update: Partial<IssueTrainRecord>
-  ): Promise<IssueTrainRecord> =>
-    stateMutation(async () => {
-      state = updateIssueRecord(state, issueNumber, update);
-      await saveTrainState(input.cwd, state);
-      return state.issues[String(issueNumber)]!;
-    });
+  const pullRequests = await mapLimit(
+    nodes,
+    input.config.concurrency.validate,
+    async (node): Promise<PullRequestValidationResult> => {
+      deps.log?.(
+        node.issue
+          ? `Validating PR #${node.pr.number} for issue #${node.issue.number}`
+          : `Validating PR #${node.pr.number} with Standards only`
+      );
 
-  await mapLimit(records, input.config.concurrency.validate, async (record) => {
-    deps.log?.(
-      `Validating PR #${record.pr!.number} for issue #${record.issue.number}`
-    );
-    await persistIssue(record.issue.number, {
-      status: "validating",
-      lastError: undefined,
-    });
-    await gitMutate(() =>
-      deps.git.prepareBranchFromBase(record.branch, record.baseBranch)
-    );
+      await gitMutate(() =>
+        deps.git.prepareBranchFromBase(node.pr.headRefName, node.pr.baseRefName)
+      );
 
-    let pr = await deps.github.getPullRequest(
-      input.config.repo,
-      record.pr!.number
-    );
-    let diff = await deps.github.getPullRequestDiff(
-      input.config.repo,
-      pr.number
-    );
-    const relatedIssues = await deps.github.getRelatedIssues(
-      input.config.repo,
-      record.issue
-    );
-    let findings = await collectFindings(
-      input,
-      deps,
-      record.issue.number,
-      pr.number,
-      record.branch,
-      record.baseBranch,
-      diff,
-      relatedIssues
-    );
-    let repaired = false;
+      let pr = await deps.github.getPullRequest(
+        input.config.repo,
+        node.pr.number
+      );
+      let diff = await deps.github.getPullRequestDiff(
+        input.config.repo,
+        pr.number
+      );
+      let findings = await collectFindings(input, deps, runId, node, pr, diff);
+      let repaired = false;
 
-    const blockingFindings = findings.filter(
-      (finding) => finding.severity === "blocking"
-    );
-    if ((input.repair ?? true) && blockingFindings.length > 0) {
-      const outcome = await deps.agent.repairPullRequest({
-        cwd: input.cwd,
-        config: input.config,
-        trainId: input.trainId,
-        issue: record.issue,
-        relatedIssues,
-        branch: record.branch,
-        baseBranch: record.baseBranch,
-        findings: blockingFindings,
+      const blockingFindings = findings.filter(
+        (finding) => finding.severity === "blocking"
+      );
+      if ((input.repair ?? true) && blockingFindings.length > 0) {
+        const outcome = await deps.agent.repairPullRequest({
+          cwd: input.cwd,
+          config: input.config,
+          runId,
+          issue: node.issue,
+          relatedIssues: node.relatedIssues,
+          prNumber: pr.number,
+          branch: pr.headRefName,
+          baseBranch: pr.baseRefName,
+          findings: blockingFindings,
+        });
+
+        if (outcome.commits.length > 0) {
+          repaired = true;
+          await gitMutate(() => deps.git.pushBranch(pr.headRefName));
+          pr = await deps.github.getPullRequest(input.config.repo, pr.number);
+          diff = await deps.github.getPullRequestDiff(
+            input.config.repo,
+            pr.number
+          );
+          findings = await collectFindings(input, deps, runId, node, pr, diff);
+        }
+      }
+
+      const specSkipped = !node.issue;
+      const preparedReview = preparePullRequestReview({
+        pr,
+        diff,
+        findings,
+        specSkipped,
       });
 
-      if (outcome.commits.length > 0) {
-        repaired = true;
-        await gitMutate(() => deps.git.pushBranch(record.branch));
-        pr = await deps.github.getPullRequest(input.config.repo, pr.number);
-        diff = await deps.github.getPullRequestDiff(
-          input.config.repo,
-          pr.number
-        );
-        findings = await collectFindings(
-          input,
-          deps,
-          record.issue.number,
-          pr.number,
-          record.branch,
-          record.baseBranch,
-          diff,
-          relatedIssues
-        );
-      }
-    }
+      await githubMutate(() =>
+        deps.github.createPullRequestReview({
+          repo: input.config.repo,
+          pullNumber: pr.number,
+          commitId: pr.headRefOid,
+          event: preparedReview.event,
+          body: preparedReview.body,
+          comments: preparedReview.comments,
+        })
+      );
 
-    const preparedReview = preparePullRequestReview({
-      pr,
-      diff,
-      findings,
-    });
-
-    await githubMutate(() =>
-      deps.github.createPullRequestReview({
-        repo: input.config.repo,
-        pullNumber: pr.number,
-        commitId: pr.headRefOid,
-        event: preparedReview.event,
-        body: preparedReview.body,
-        comments: preparedReview.comments,
-      })
-    );
-
-    const blockingCount = findings.filter(
-      (finding) => finding.severity === "blocking"
-    ).length;
-    const advisoryCount = findings.length - blockingCount;
-    await persistIssue(record.issue.number, {
-      status: blockingCount === 0 ? "validated" : "validation_failed",
-      pr: {
-        number: pr.number,
-        url: pr.url,
-        headRefName: pr.headRefName,
-        baseRefName: pr.baseRefName,
-        headRefOid: pr.headRefOid,
-      },
-      validation: {
-        checkedAt: new Date().toISOString(),
+      const blockingCount = findings.filter(
+        (finding) => finding.severity === "blocking"
+      ).length;
+      const advisoryCount = findings.length - blockingCount;
+      return {
+        pr: {
+          number: pr.number,
+          url: pr.url,
+          headRefName: pr.headRefName,
+          baseRefName: pr.baseRefName,
+          headRefOid: pr.headRefOid,
+        },
+        issueNumber: node.issue?.number,
+        status: blockingCount === 0 ? "validated" : "validation_failed",
         blockingFindings: blockingCount,
         advisoryFindings: advisoryCount,
-        reviewEvent: preparedReview.event,
         repaired,
-      },
-    });
-  });
+        specSkipped,
+        reviewEvent: preparedReview.event,
+      };
+    }
+  );
 
-  return state;
+  return {
+    repo: input.config.repo,
+    checkedAt,
+    pullRequests,
+  };
 }
 
 async function collectFindings(
   input: ValidateInput,
   deps: ValidateDeps,
-  issueNumber: number,
-  prNumber: number,
-  branch: string,
-  baseBranch: string,
-  diff: string,
-  relatedIssues: readonly Issue[]
+  runId: string,
+  node: OpenPrNode,
+  pr: PullRequest,
+  diff: string
 ): Promise<ReviewFinding[]> {
-  const state = await loadTrainState(input.cwd, input.trainId);
-  const record = state.issues[String(issueNumber)];
-  if (!record)
-    throw new Error(
-      `Issue #${issueNumber} is not part of train ${input.trainId}.`
+  const standards = deps.agent.reviewPullRequest({
+    cwd: input.cwd,
+    config: input.config,
+    runId,
+    issue: node.issue,
+    relatedIssues: node.relatedIssues,
+    prNumber: pr.number,
+    branch: pr.headRefName,
+    baseBranch: pr.baseRefName,
+    diff,
+    axis: "standards",
+  });
+
+  const reviews = node.issue
+    ? await Promise.all([
+        standards,
+        deps.agent.reviewPullRequest({
+          cwd: input.cwd,
+          config: input.config,
+          runId,
+          issue: node.issue,
+          relatedIssues: node.relatedIssues,
+          prNumber: pr.number,
+          branch: pr.headRefName,
+          baseBranch: pr.baseRefName,
+          diff,
+          axis: "spec",
+        }),
+      ])
+    : [await standards];
+
+  return reviews.flatMap((review) => review.findings);
+}
+
+function selectedNodes(
+  graph: Awaited<ReturnType<typeof loadOpenPrGraph>>,
+  pullNumbers?: readonly number[]
+): OpenPrNode[] {
+  const wanted = pullNumbers ? new Set(pullNumbers) : undefined;
+  const nodes = graph.topologicalOrder
+    .map((prNumber) => graph.nodes.get(prNumber))
+    .filter((node): node is OpenPrNode =>
+      Boolean(node && (!wanted || wanted.has(node.pr.number)))
     );
 
-  const [standards, spec] = await Promise.all([
-    deps.agent.reviewPullRequest({
-      cwd: input.cwd,
-      config: input.config,
-      trainId: input.trainId,
-      issue: record.issue,
-      relatedIssues,
-      prNumber,
-      branch,
-      baseBranch,
-      diff,
-      axis: "standards",
-    }),
-    deps.agent.reviewPullRequest({
-      cwd: input.cwd,
-      config: input.config,
-      trainId: input.trainId,
-      issue: record.issue,
-      relatedIssues,
-      prNumber,
-      branch,
-      baseBranch,
-      diff,
-      axis: "spec",
-    }),
-  ]);
+  if (wanted) {
+    const found = new Set(nodes.map((node) => node.pr.number));
+    const missing = [...wanted].filter((prNumber) => !found.has(prNumber));
+    if (missing.length > 0) {
+      throw new Error(
+        `Open PR(s) not found in ${graph.topologicalOrder.length} loaded PRs: ${missing.map((number) => `#${number}`).join(", ")}.`
+      );
+    }
+  }
 
-  return [...standards.findings, ...spec.findings];
+  return nodes;
 }

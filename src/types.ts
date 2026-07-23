@@ -31,22 +31,16 @@ export interface DockerMountConfig {
 export interface AgentTrainConfig {
   readonly repo: string;
   readonly targetBranch: string;
-  readonly issueQuery: string;
-  readonly branchPrefix: string;
-  readonly trainPrefix: string;
   readonly remote: string;
   readonly models: {
-    readonly implementation: string;
     readonly repair: string;
     readonly review: string;
   };
   readonly reasoning: {
-    readonly implementation: ReasoningEffort;
     readonly repair: ReasoningEffort;
     readonly review: ReasoningEffort;
   };
   readonly concurrency: {
-    readonly implement: number;
     readonly validate: number;
     readonly github: number;
   };
@@ -67,65 +61,25 @@ export interface PullRequest {
   readonly number: number;
   readonly url: string;
   readonly title: string;
+  readonly body: string;
   readonly state: string;
   readonly isDraft?: boolean;
   readonly headRefName: string;
   readonly baseRefName: string;
+  readonly baseRefOid: string;
   readonly headRefOid: string;
   readonly mergeStateStatus?: string;
   readonly reviewDecision?: string;
+  readonly closingIssuesReferences: readonly IssueRef[];
+  readonly latestReviews: readonly PullRequestReviewSummary[];
   readonly statusCheckRollup?: readonly unknown[];
 }
 
-export type IssueRunStatus =
-  | "planned"
-  | "blocked"
-  | "implementing"
-  | "pr_opened"
-  | "validating"
-  | "validated"
-  | "validation_failed"
-  | "merged";
-
-export interface IssueTrainRecord {
-  readonly issue: Issue;
-  readonly branch: string;
-  readonly baseBranch: string;
-  readonly baseAnchorSha?: string;
-  readonly blockers: readonly number[];
-  readonly syntheticBase?: string;
-  readonly status: IssueRunStatus;
-  readonly pr?: Pick<
-    PullRequest,
-    "number" | "url" | "headRefName" | "baseRefName" | "headRefOid"
-  >;
-  readonly commits: readonly string[];
-  readonly lastError?: string;
-  readonly validation?: {
-    readonly checkedAt: string;
-    readonly blockingFindings: number;
-    readonly advisoryFindings: number;
-    readonly reviewEvent: "COMMENT" | "REQUEST_CHANGES";
-    readonly repaired: boolean;
-  };
-}
-
-export interface SyntheticBaseRecord {
-  readonly branch: string;
-  readonly issueNumber: number;
-  readonly blockers: readonly number[];
-  readonly status: "planned" | "created" | "failed" | "obsolete";
-  readonly lastError?: string;
-}
-
-export interface TrainState {
-  readonly trainId: string;
-  readonly repo: string;
-  readonly targetBranch: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-  readonly issues: Record<string, IssueTrainRecord>;
-  readonly syntheticBases: Record<string, SyntheticBaseRecord>;
+export interface PullRequestReviewSummary {
+  readonly state: string;
+  readonly body: string;
+  readonly submittedAt?: string;
+  readonly authorLogin?: string;
 }
 
 export type ReviewAxis = "standards" | "spec";

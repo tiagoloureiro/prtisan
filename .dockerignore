@@ -1,7 +1,7 @@
 node_modules
 dist
 .git
-.sandcastle/trains
+.sandcastle/runs
 .sandcastle/codex-home
 .sandcastle/worktrees
 .sandcastle/logs

@@ -18,7 +18,6 @@
     "link-bin": "bun run build && bun link --global",
     "release:pack": "mkdir -p release && rm -f release/*.tgz release/SHA256SUMS && bun run build && bun pm pack --destination release && sha256sum release/*.tgz > release/SHA256SUMS",
     "init": "bun run src/index.ts init",
-    "create-prs": "bun run src/index.ts create-prs",
     "validate": "bun run src/index.ts validate",
     "merge": "bun run src/index.ts merge",
     "lint": "eslint .",

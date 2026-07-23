@@ -17,9 +17,10 @@ describe("scaffold", () => {
       [".sandcastle/Dockerfile", "created"],
       [".gitignore", "created"],
     ]);
-    expect(
-      await readText(`${root}/.sandcastle/agent-train.config.json`)
-    ).toContain('"repo": "o/r"');
+    const config = await readText(
+      `${root}/.sandcastle/agent-train.config.json`
+    );
+    expect(config).toContain('"repo": "o/r"');
     expect(await readText(`${root}/.sandcastle/Dockerfile`)).toContain(
       "FROM oven/bun:"
     );

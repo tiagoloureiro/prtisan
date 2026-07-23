@@ -20,7 +20,7 @@ export interface ScaffoldResult {
 const GITIGNORE_RULES = [
   ".sandcastle/.env",
   ".sandcastle/codex-home/",
-  ".sandcastle/trains/",
+  ".sandcastle/runs/",
   ".sandcastle/worktrees/",
   ".sandcastle/logs/",
   ".sandcastle/patches/",
@@ -33,22 +33,16 @@ export function defaultScaffoldConfig(input: {
   return {
     repo: input.repo,
     targetBranch: input.targetBranch,
-    issueQuery: "state:open label:ready-for-agent",
-    branchPrefix: "agent/issue-",
-    trainPrefix: "train",
     remote: "origin",
     models: {
-      implementation: "gpt-5.6-terra",
       repair: "gpt-5.6-terra",
       review: "gpt-5.6-luna",
     },
     reasoning: {
-      implementation: "medium",
       repair: "medium",
       review: "low",
     },
     concurrency: {
-      implement: 3,
       validate: 4,
       github: 4,
     },

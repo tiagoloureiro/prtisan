@@ -1,22 +1,25 @@
 # Agent PR Train
 
-`agent-train` is a local Bun-first CLI for coordinating dependent GitHub issues through Codex CLI agents, Sandcastle Docker sandboxes, stacked pull requests, automated validation, and a guarded squash-merge train.
+`agent-train` is a local Bun-first CLI for validating and merging a GitHub-native stack of open pull requests through Codex CLI agents, Sandcastle Docker sandboxes, and guarded squash merges.
 
 ## Commands
 
 ```bash
 bun run init --cwd /path/to/repo
-bun run create-prs --cwd /path/to/repo
-bun run validate --cwd /path/to/repo --train-id <train-id>
-bun run merge --cwd /path/to/repo --train-id <train-id>
+bun run validate --cwd /path/to/repo --repo owner/repo
+bun run merge --cwd /path/to/repo --repo owner/repo
 ```
 
-Bare `bun init` is Bun's package initializer, so `agent-train` uses package scripts for local development. After `bun run build`, the binary entrypoint is `agent-train init`, `agent-train create-prs`, `agent-train validate`, and `agent-train merge`.
+Bare `bun init` is Bun's package initializer, so `agent-train` uses package scripts for local development. After `bun run build`, the binary entrypoint is `agent-train init`, `agent-train validate`, and `agent-train merge`.
 
 `init` creates the target repo scaffold:
 
 - GitHub git repo: writes the files in a temporary worktree, pushes `agent-train/setup`, creates or reuses a setup issue, and opens or updates the matching PR.
 - Non-git repo, or a repo not connected to GitHub through `gh`: writes the files directly into the target directory.
+
+`validate` loads all open PRs in the repo, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking findings, and posts a GitHub PR review.
+
+`merge` reloads all open PRs from GitHub, processes them in topological order, stops on draft/not-ready/blocking-validation PRs, squash-merges with `--match-head-commit`, restacks descendants, and revalidates affected PRs.
 
 ## Requirements
 
@@ -25,7 +28,7 @@ Bare `bun init` is Bun's package initializer, so `agent-train` uses package scri
 - Docker
 - Git
 - Codex CLI
-- A target repository with `.sandcastle/agent-train.config.json`
+- A target repository with `.sandcastle/agent-train.config.json`, or pass `--repo owner/repo`
 
 ## Install the Binary
 

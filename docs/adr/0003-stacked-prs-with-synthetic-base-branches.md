@@ -6,11 +6,11 @@ Accepted
 
 ## Context
 
-GitHub pull requests have one base branch, but an issue may be blocked by multiple issue branches.
+GitHub pull requests have one base branch, but an open PR may depend on multiple other open PR branches.
 
 ## Decision
 
-For multi-blocker issues, create a synthetic base branch that merges all blocker branches. The dependent issue branch is based on that synthetic branch.
+For multi-blocker PRs, create a synthetic base branch named from the dependent PR number that merges all open blocker branches. The dependent PR branch is based on that synthetic branch.
 
 ## Consequences
 

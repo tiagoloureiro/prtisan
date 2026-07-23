@@ -1,5 +1,4 @@
 import { SandcastleCodexRunner } from "./agent.js";
-import { executeCreatePrs } from "./commands/create-prs.js";
 import { executeInit, initSummary } from "./commands/init.js";
 import { executeMerge } from "./commands/merge.js";
 import { executeValidate } from "./commands/validate.js";
@@ -8,7 +7,7 @@ import { BunCommandRunner } from "./exec.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
 import { assertPreflight } from "./preflight.js";
-import { pruneTrainArtifacts } from "./retention.js";
+import { pruneRuntimeArtifacts } from "./retention.js";
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const parsed = parseCliArgs(argv);
@@ -16,7 +15,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     printHelp();
     return parsed.command ? 0 : 1;
   }
-  if (!["init", "create-prs", "validate", "merge"].includes(parsed.command)) {
+  if (!["init", "validate", "merge"].includes(parsed.command)) {
     throw new Error(`Unknown command: ${parsed.command}`);
   }
 
@@ -40,85 +39,57 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     return 0;
   }
 
-  const config = await loadConfig(cwd, parsed.options.config);
+  const config = await loadConfig(cwd, parsed.options.config, {
+    repo: parsed.options.repo,
+    targetBranch: parsed.options.targetBranch,
+  });
   const git = new GitClient(runner, cwd, config);
   const agent = new SandcastleCodexRunner();
 
   await github.assertReady();
   await git.assertReady();
   await assertPreflight({ cwd, config, runner });
-  await pruneTrainArtifacts({ cwd, config, runner }).catch((error) => {
+  await pruneRuntimeArtifacts({ cwd, config, runner }).catch((error) => {
     console.error(
       `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`
     );
   });
 
-  if (parsed.command === "create-prs") {
-    const state = await executeCreatePrs(
-      {
-        cwd,
-        config,
-        trainId: parsed.options.trainId,
-        dryRun: parsed.options.dryRun,
-      },
-      { github, git, agent, log: console.error }
-    );
-    console.log(
-      JSON.stringify(
-        {
-          trainId: state.trainId,
-          statePath: `.sandcastle/trains/${state.trainId}/state.json`,
-        },
-        null,
-        2
-      )
-    );
-    return 0;
-  }
-
-  if (!parsed.options.trainId) {
-    throw new Error(`--train-id is required for ${parsed.command}.`);
-  }
-
   if (parsed.command === "validate") {
-    const state = await executeValidate(
+    const result = await executeValidate(
       {
         cwd,
         config,
-        trainId: parsed.options.trainId,
-        issueNumbers: parsed.options.issues,
         repair: parsed.options.repair,
       },
       { github, git, agent, log: console.error }
     );
-    console.log(JSON.stringify(validationSummary(state), null, 2));
+    console.log(JSON.stringify(validationSummary(result), null, 2));
     return 0;
   }
 
   if (parsed.command === "merge") {
-    const validateIssues = async (issueNumbers: readonly number[]) => {
+    const validatePullRequests = async (pullNumbers: readonly number[]) => {
       await executeValidate(
         {
           cwd,
           config,
-          trainId: parsed.options.trainId!,
-          issueNumbers,
+          pullNumbers,
           repair: true,
         },
         { github, git, agent, log: console.error }
       );
     };
 
-    const state = await executeMerge(
+    const result = await executeMerge(
       {
         cwd,
         config,
-        trainId: parsed.options.trainId,
         validateAffected: parsed.options.validateAffected,
       },
-      { github, git, validateIssues, log: console.error }
+      { github, git, validatePullRequests, log: console.error }
     );
-    console.log(JSON.stringify(mergeSummary(state), null, 2));
+    console.log(JSON.stringify(mergeSummary(result), null, 2));
     return 0;
   }
 
@@ -138,12 +109,9 @@ interface ParsedOptions {
   targetBranch?: string;
   branch?: string;
   remote?: string;
-  trainId?: string;
-  dryRun?: boolean;
   force?: boolean;
   repair?: boolean;
   validateAffected?: boolean;
-  issues?: readonly number[];
 }
 
 export function parseCliArgs(argv: readonly string[]): ParsedArgs {
@@ -170,15 +138,6 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
       options.branch = requireValue(rest, ++index, arg);
     } else if (arg === "--remote") {
       options.remote = requireValue(rest, ++index, arg);
-    } else if (arg === "--train-id") {
-      options.trainId = requireValue(rest, ++index, arg);
-    } else if (arg === "--issues") {
-      options.issues = requireValue(rest, ++index, arg)
-        .split(",")
-        .map((value) => Number(value.trim()))
-        .filter((value) => Number.isInteger(value));
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
     } else if (arg === "--force") {
       options.force = true;
     } else if (arg === "--no-repair") {
@@ -210,27 +169,21 @@ function requireValue(
 }
 
 function validationSummary(
-  state: Awaited<ReturnType<typeof executeValidate>>
+  result: Awaited<ReturnType<typeof executeValidate>>
 ): unknown {
   return {
-    trainId: state.trainId,
-    issues: Object.values(state.issues).map((record) => ({
-      issue: record.issue.number,
-      pr: record.pr?.number,
-      status: record.status,
-      validation: record.validation,
-    })),
+    repo: result.repo,
+    checkedAt: result.checkedAt,
+    pullRequests: result.pullRequests,
   };
 }
 
 function mergeSummary(
-  state: Awaited<ReturnType<typeof executeMerge>>
+  result: Awaited<ReturnType<typeof executeMerge>>
 ): unknown {
   return {
-    trainId: state.trainId,
-    merged: Object.values(state.issues)
-      .filter((record) => record.status === "merged")
-      .map((record) => ({ issue: record.issue.number, pr: record.pr?.number })),
+    repo: result.repo,
+    merged: result.merged,
   };
 }
 
@@ -239,8 +192,7 @@ function printHelp(): void {
 
 Usage:
   agent-train init [--cwd <repo>] [--repo OWNER/REPO] [--target-branch <branch>] [--branch <branch>] [--remote <name>] [--force]
-  agent-train create-prs [--cwd <repo>] [--config <path>] [--train-id <id>] [--dry-run]
-  agent-train validate --train-id <id> [--cwd <repo>] [--issues 1,2] [--no-repair]
-  agent-train merge --train-id <id> [--cwd <repo>] [--no-validate-affected]
+  agent-train validate [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-repair]
+  agent-train merge [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-validate-affected]
 `);
 }

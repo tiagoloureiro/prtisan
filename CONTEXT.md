@@ -4,18 +4,20 @@
 
 ### Core concepts
 
-Agent PR Train CLI: A local Bun TypeScript command-line tool that coordinates issue implementation, validation, and merging across a dependent set of GitHub pull requests. Avoid: "GitHub workflow" when that could mean GitHub Actions.
+Agent PR Train CLI: A local Bun TypeScript command-line tool that validates and merges a dependent set of GitHub pull requests. Avoid: "GitHub workflow" when that could mean GitHub Actions.
 
-Train: A single orchestration run over a selected issue dependency graph. The train owns branch names, PR mappings, validation state, and merge order.
+Open PR graph: The live dependency graph derived from all open GitHub PRs, including drafts. It is rebuilt from GitHub every run.
 
-Setup scaffold: The minimal target-repository files needed before a train can run: `.sandcastle/agent-train.config.json`, `.sandcastle/Dockerfile`, and gitignore rules for local auth, logs, worktrees, and train state.
+Train: The ordered set of open PRs that should merge together. The train does not have a local id or state file; GitHub PRs, branches, reviews, checks, and linked issues are the source of truth.
 
-Frontier: The set of issues whose blocking issue branches already exist and can be worked on in parallel.
+Setup scaffold: The minimal target-repository files needed before validation or merge can run: `.sandcastle/agent-train.config.json`, `.sandcastle/Dockerfile`, and gitignore rules for local auth, logs, and worktrees.
 
-Issue branch: The branch where one Codex agent implements one GitHub issue.
+Frontier: The set of PRs whose blocker PRs have already merged or are otherwise absent from the current open PR graph.
 
-Synthetic base branch: A generated branch that merges multiple blocker branches so a dependent issue can have one GitHub PR base while still depending on several prior PRs.
+PR branch: The GitHub pull request head branch that Codex may validate, repair, rebase, and push.
+
+Synthetic base branch: A generated branch named from the dependent PR number that merges multiple open blocker branches so a dependent PR can have one GitHub PR base while still depending on several prior PRs.
 
 Validation pass: A review run that checks a PR against repository standards and the related issue context.
 
-Repair pass: A Codex run on an existing issue branch that attempts to fix blocking validation findings before the tool posts remaining comments.
+Repair pass: A Codex run on an existing PR branch that attempts to fix blocking validation findings before the tool posts remaining comments.

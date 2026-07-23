@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import { findDiffPosition, parseUnifiedDiff } from "@/diff.js";
 import { preparePullRequestReview } from "@/review.js";
-import type { PullRequest, ReviewFinding } from "@/types.js";
+import type { ReviewFinding } from "@/types.js";
+
+import { pullRequest } from "./helpers.js";
 
 const diff = `diff --git a/src/a.ts b/src/a.ts
 index 111..222 100644
@@ -35,15 +37,14 @@ describe("diff mapping", () => {
   });
 
   test("keeps unmappable findings in review body", () => {
-    const pr: PullRequest = {
+    const pr = pullRequest({
       number: 1,
       url: "",
       title: "",
-      state: "OPEN",
       headRefName: "h",
       baseRefName: "b",
       headRefOid: "sha",
-    };
+    });
     const findings: ReviewFinding[] = [
       {
         axis: "spec",

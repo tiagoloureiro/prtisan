@@ -1,32 +1,18 @@
-import { slugify } from "./path.js";
-import type { AgentTrainConfig, Issue } from "./types.js";
+import type { ReviewAxis } from "./types.js";
 
-export function issueBranch(
-  config: AgentTrainConfig,
-  issue: Pick<Issue, "number" | "title">
-): string {
-  return `${config.branchPrefix}${issue.number}-${slugify(issue.title)}`;
-}
-
-export function syntheticBaseBranch(
-  config: AgentTrainConfig,
-  trainId: string,
-  issueNumber: number
-): string {
-  return `${config.trainPrefix}/${trainId}/base/${issueNumber}`;
+export function syntheticBaseBranch(prNumber: number): string {
+  return `agent-train/base/pr-${prNumber}`;
 }
 
 export function reviewSandboxBranch(
-  config: AgentTrainConfig,
-  trainId: string,
   prNumber: number,
-  axis: "standards" | "spec"
+  axis: ReviewAxis
 ): string {
-  return `${config.trainPrefix}/${trainId}/review/${prNumber}-${axis}-${crypto.randomUUID().slice(0, 8)}`;
+  return `agent-train/review/pr-${prNumber}-${axis}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-export function trainIdFromDate(date = new Date()): string {
+export function runIdFromDate(label: string, date = new Date()): string {
   const stamp = date.toISOString().replaceAll("-", "").replace(/T.*/, "");
   const random = crypto.randomUUID().slice(0, 8);
-  return `${stamp}-${random}`;
+  return `${label}-${stamp}-${random}`;
 }

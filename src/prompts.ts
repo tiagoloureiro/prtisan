@@ -1,16 +1,8 @@
 import type { Issue, ReviewAxis, ReviewFinding } from "./types.js";
 
-export interface ImplementPromptInput {
-  readonly issue: Issue;
-  readonly relatedIssues: readonly Issue[];
-  readonly targetBranch: string;
-  readonly baseBranch: string;
-  readonly branch: string;
-}
-
 export interface ReviewPromptInput {
   readonly axis: ReviewAxis;
-  readonly issue: Issue;
+  readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
   readonly prNumber: number;
   readonly branch: string;
@@ -19,28 +11,11 @@ export interface ReviewPromptInput {
 }
 
 export interface RepairPromptInput {
-  readonly issue: Issue;
+  readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
   readonly findings: readonly ReviewFinding[];
+  readonly prNumber: number;
   readonly branch: string;
-}
-
-export function buildImplementPrompt(input: ImplementPromptInput): string {
-  return [
-    `You are implementing GitHub issue #${input.issue.number} on branch ${input.branch}.`,
-    `Base branch: ${input.baseBranch}. Target branch: ${input.targetBranch}.`,
-    "",
-    "Constraints:",
-    "- Implement only this issue.",
-    "- Preserve compatibility with the related blocker/dependent issues shown below.",
-    "- Add or update focused tests where the change has behavior.",
-    "- Run the smallest relevant verification command you can identify.",
-    "- Commit your completed work to the current branch.",
-    "- When finished, output <promise>COMPLETE</promise>.",
-    "",
-    issueBlock("Issue to implement", input.issue),
-    relatedIssuesBlock(input.relatedIssues),
-  ].join("\n");
 }
 
 export function buildReviewPrompt(input: ReviewPromptInput): string {
@@ -58,7 +33,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
         ];
 
   return [
-    `You are validating PR #${input.prNumber} for GitHub issue #${input.issue.number}.`,
+    input.issue
+      ? `You are validating PR #${input.prNumber} for GitHub issue #${input.issue.number}.`
+      : `You are validating PR #${input.prNumber}. It has no linked closing issue.`,
     `PR head branch: ${input.branch}.`,
     `Base branch: ${input.baseBranch}.`,
     "Use $code-review as the review rubric. Execute only the requested axis in this sandbox; agent-train runs the two axes in separate parallel sandboxes.",
@@ -87,7 +64,9 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     ),
     "After the </review> tag, output <promise>COMPLETE</promise>.",
     "",
-    issueBlock("Primary issue", input.issue),
+    input.issue
+      ? issueBlock("Primary issue", input.issue)
+      : "Primary issue: none linked. For this PR, run Standards only; Spec is skipped by agent-train.",
     relatedIssuesBlock(input.relatedIssues),
     "",
     "PR diff:",
@@ -99,14 +78,18 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
 
 export function buildRepairPrompt(input: RepairPromptInput): string {
   return [
-    `You are repairing branch ${input.branch} for GitHub issue #${input.issue.number}.`,
+    input.issue
+      ? `You are repairing branch ${input.branch} for GitHub issue #${input.issue.number}.`
+      : `You are repairing branch ${input.branch} for PR #${input.prNumber}. It has no linked closing issue.`,
     "",
     "Fix only clear blocking validation findings listed below.",
     "Do not address advisory findings unless they are trivial and directly adjacent to a blocking fix.",
     "Run focused verification and commit the repair to the current branch.",
     "When finished, output <promise>COMPLETE</promise>.",
     "",
-    issueBlock("Primary issue", input.issue),
+    input.issue
+      ? issueBlock("Primary issue", input.issue)
+      : "Primary issue: none linked. Do not infer product requirements beyond the PR diff.",
     relatedIssuesBlock(input.relatedIssues),
     "",
     "Blocking findings:",

@@ -2,18 +2,18 @@ import type { CommandRunner } from "./exec.js";
 import { joinPath, resolvePath } from "./path.js";
 import type { AgentTrainConfig } from "./types.js";
 
-export async function pruneTrainArtifacts(input: {
+export async function pruneRuntimeArtifacts(input: {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
   readonly runner: CommandRunner;
 }): Promise<void> {
   const ttl = `+${input.config.retention.ttlDays}`;
   const maxLogSize = `+${input.config.retention.maxLogBytes}c`;
-  const trainsRoot = joinPath(input.cwd, ".sandcastle", "trains");
+  const runsRoot = joinPath(input.cwd, ".sandcastle", "runs");
 
-  if (await directoryExists(input.runner, trainsRoot)) {
+  if (await directoryExists(input.runner, runsRoot)) {
     await input.runner.run("find", [
-      trainsRoot,
+      runsRoot,
       "-path",
       "*/worktrees/*",
       "-type",
@@ -28,7 +28,7 @@ export async function pruneTrainArtifacts(input: {
       "+",
     ]);
     await input.runner.run("find", [
-      trainsRoot,
+      runsRoot,
       "-path",
       "*/logs/*",
       "-type",
@@ -38,7 +38,7 @@ export async function pruneTrainArtifacts(input: {
       "-delete",
     ]);
     await input.runner.run("find", [
-      trainsRoot,
+      runsRoot,
       "-path",
       "*/logs/*",
       "-type",

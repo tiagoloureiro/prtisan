@@ -5,7 +5,7 @@ coverage/
 .env
 .sandcastle/.env
 .sandcastle/codex-home/
-.sandcastle/trains/
+.sandcastle/runs/
 .sandcastle/worktrees/
 .sandcastle/logs/
 .sandcastle/patches/

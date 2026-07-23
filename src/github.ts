@@ -2,10 +2,10 @@ import type { CommandRunner } from "./exec.js";
 import { mustRun, runJson } from "./exec.js";
 import { writeText } from "./fs.js";
 import type {
-  AgentTrainConfig,
   Issue,
   IssueRef,
   PullRequest,
+  PullRequestReviewSummary,
   ReviewFinding,
 } from "./types.js";
 
@@ -28,11 +28,15 @@ const PR_JSON_FIELDS = [
   "title",
   "state",
   "isDraft",
+  "body",
   "headRefName",
   "baseRefName",
+  "baseRefOid",
   "headRefOid",
   "mergeStateStatus",
   "reviewDecision",
+  "closingIssuesReferences",
+  "latestReviews",
   "statusCheckRollup",
 ].join(",");
 
@@ -97,31 +101,6 @@ export class GitHubClient {
     await mustRun(this.runner, "gh", ["auth", "status"], { cwd: this.cwd });
   }
 
-  async listIssues(config: AgentTrainConfig): Promise<Issue[]> {
-    try {
-      const raw = await runJson<unknown[]>(
-        this.runner,
-        "gh",
-        [
-          "issue",
-          "list",
-          "--repo",
-          config.repo,
-          "--search",
-          config.issueQuery,
-          "--json",
-          ISSUE_JSON_FIELDS,
-          "--limit",
-          "1000",
-        ],
-        { cwd: this.cwd }
-      );
-      return raw.map(normalizeIssue);
-    } catch (error) {
-      throw enrichDependencyFieldError(error);
-    }
-  }
-
   async getIssue(repo: string, issueNumber: number): Promise<Issue> {
     try {
       const raw = await runJson<unknown>(
@@ -142,25 +121,6 @@ export class GitHubClient {
     } catch (error) {
       throw enrichDependencyFieldError(error);
     }
-  }
-
-  async getRelatedIssues(repo: string, issue: Issue): Promise<Issue[]> {
-    const numbers = new Set<number>();
-    for (const ref of [
-      ...issue.blockedBy,
-      ...issue.blocking,
-      ...issue.subIssues,
-    ]) {
-      numbers.add(ref.number);
-    }
-    if (issue.parent) numbers.add(issue.parent.number);
-    numbers.delete(issue.number);
-
-    const related: Issue[] = [];
-    for (const issueNumber of numbers) {
-      related.push(await this.getIssue(repo, issueNumber));
-    }
-    return related;
   }
 
   async findIssueByBodyMarker(
@@ -224,33 +184,6 @@ export class GitHubClient {
     }
   }
 
-  async createIssueComment(
-    repo: string,
-    issueNumber: number,
-    body: string
-  ): Promise<void> {
-    const bodyFile = `/tmp/agent-train-issue-${issueNumber}-${crypto.randomUUID()}.md`;
-    await writeText(bodyFile, body);
-    try {
-      await mustRun(
-        this.runner,
-        "gh",
-        [
-          "issue",
-          "comment",
-          String(issueNumber),
-          "--repo",
-          repo,
-          "--body-file",
-          bodyFile,
-        ],
-        { cwd: this.cwd }
-      );
-    } finally {
-      await this.runner.run("rm", ["-f", bodyFile]);
-    }
-  }
-
   async getPullRequestByBranch(
     repo: string,
     branch: string
@@ -275,6 +208,27 @@ export class GitHubClient {
       { cwd: this.cwd }
     );
     return prs[0] ? normalizePullRequest(prs[0]) : undefined;
+  }
+
+  async listOpenPullRequests(repo: string): Promise<PullRequest[]> {
+    const raw = await runJson<unknown[]>(
+      this.runner,
+      "gh",
+      [
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--state",
+        "open",
+        "--json",
+        PR_JSON_FIELDS,
+        "--limit",
+        "1000",
+      ],
+      { cwd: this.cwd }
+    );
+    return raw.map(normalizePullRequest);
   }
 
   async getPullRequest(repo: string, pullNumber: number): Promise<PullRequest> {
@@ -374,33 +328,6 @@ export class GitHubClient {
       ["pr", "edit", String(pullNumber), "--repo", repo, "--base", baseBranch],
       { cwd: this.cwd }
     );
-  }
-
-  async editPullRequestBody(
-    repo: string,
-    pullNumber: number,
-    body: string
-  ): Promise<void> {
-    const bodyFile = `/tmp/agent-train-pr-${pullNumber}-${crypto.randomUUID()}.md`;
-    await writeText(bodyFile, body);
-    try {
-      await mustRun(
-        this.runner,
-        "gh",
-        [
-          "pr",
-          "edit",
-          String(pullNumber),
-          "--repo",
-          repo,
-          "--body-file",
-          bodyFile,
-        ],
-        { cwd: this.cwd }
-      );
-    } finally {
-      await this.runner.run("rm", ["-f", bodyFile]);
-    }
   }
 
   async getPullRequestDiff(repo: string, pullNumber: number): Promise<string> {
@@ -558,10 +485,12 @@ function normalizePullRequest(raw: unknown): PullRequest {
     number: numberField(value, "number"),
     url: stringField(value, "url"),
     title: stringField(value, "title"),
+    body: typeof value.body === "string" ? value.body : "",
     state: stringField(value, "state"),
     isDraft: Boolean(value.isDraft),
     headRefName: stringField(value, "headRefName"),
     baseRefName: stringField(value, "baseRefName"),
+    baseRefOid: typeof value.baseRefOid === "string" ? value.baseRefOid : "",
     headRefOid: stringField(value, "headRefOid"),
     mergeStateStatus:
       typeof value.mergeStateStatus === "string"
@@ -574,7 +503,34 @@ function normalizePullRequest(raw: unknown): PullRequest {
     statusCheckRollup: Array.isArray(value.statusCheckRollup)
       ? value.statusCheckRollup
       : [],
+    closingIssuesReferences: normalizeRefs(value.closingIssuesReferences),
+    latestReviews: normalizeLatestReviews(value.latestReviews),
   };
+}
+
+function normalizeLatestReviews(value: unknown): PullRequestReviewSummary[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): PullRequestReviewSummary | undefined => {
+      if (typeof item !== "object" || item === null) return undefined;
+      const record = item as Record<string, unknown>;
+      return {
+        state: String(record.state ?? ""),
+        body: typeof record.body === "string" ? record.body : "",
+        submittedAt:
+          typeof record.submittedAt === "string"
+            ? record.submittedAt
+            : undefined,
+        authorLogin: normalizeAuthorLogin(record.author),
+      };
+    })
+    .filter((review): review is PullRequestReviewSummary => Boolean(review));
+}
+
+function normalizeAuthorLogin(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const login = (value as { login?: unknown }).login;
+  return typeof login === "string" ? login : undefined;
 }
 
 function normalizeIssueSummary(raw: unknown): GitHubIssueSummary {

@@ -14,10 +14,13 @@ export interface PreparedReview {
   readonly summaryCount: number;
 }
 
+export const VALIDATION_REVIEW_MARKER = "agent-train:validation";
+
 export function preparePullRequestReview(input: {
   readonly pr: PullRequest;
   readonly diff: string;
   readonly findings: readonly ReviewFinding[];
+  readonly specSkipped?: boolean;
 }): PreparedReview {
   const diffLines = parseUnifiedDiff(input.diff);
   const comments: {
@@ -53,7 +56,18 @@ export function preparePullRequestReview(input: {
     ? "REQUEST_CHANGES"
     : "COMMENT";
 
-  const body = buildReviewSummaryBody(input.findings, summaryFindings);
+  const body = [
+    validationMarker({
+      blockingFindings: input.findings.filter(
+        (finding) => finding.severity === "blocking"
+      ).length,
+      advisoryFindings: input.findings.filter(
+        (finding) => finding.severity === "advisory"
+      ).length,
+      specSkipped: Boolean(input.specSkipped),
+    }),
+    buildReviewSummaryBody(input.findings, summaryFindings),
+  ].join("\n");
 
   return {
     event,
@@ -62,6 +76,14 @@ export function preparePullRequestReview(input: {
     inlineCount: comments.length,
     summaryCount: summaryFindings.length,
   };
+}
+
+function validationMarker(input: {
+  readonly blockingFindings: number;
+  readonly advisoryFindings: number;
+  readonly specSkipped: boolean;
+}): string {
+  return `<!-- ${VALIDATION_REVIEW_MARKER} ${JSON.stringify(input)} -->`;
 }
 
 function buildReviewSummaryBody(
