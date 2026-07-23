@@ -149,6 +149,31 @@ export class GitHubClient {
     return issues[0] ? normalizeIssueSummary(issues[0]) : undefined;
   }
 
+  async listOpenIssues(repo: string): Promise<Issue[]> {
+    try {
+      const raw = await runJson<unknown[]>(
+        this.runner,
+        "gh",
+        [
+          "issue",
+          "list",
+          "--repo",
+          repo,
+          "--state",
+          "open",
+          "--json",
+          ISSUE_JSON_FIELDS,
+          "--limit",
+          "1000",
+        ],
+        { cwd: this.cwd }
+      );
+      return raw.map(normalizeIssue);
+    } catch (error) {
+      throw enrichDependencyFieldError(error);
+    }
+  }
+
   async createIssue(input: CreateIssueInput): Promise<GitHubIssueSummary> {
     const bodyFile = `/tmp/agent-train-setup-issue-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, input.body);
@@ -184,9 +209,33 @@ export class GitHubClient {
     }
   }
 
+  async createIssueComment(
+    repo: string,
+    issueNumber: number,
+    body: string
+  ): Promise<void> {
+    await mustRun(
+      this.runner,
+      "gh",
+      [
+        "api",
+        "--method",
+        "POST",
+        `/repos/${repo}/issues/${issueNumber}/comments`,
+        "--input",
+        "-",
+      ],
+      {
+        cwd: this.cwd,
+        input: JSON.stringify({ body }),
+      }
+    );
+  }
+
   async getPullRequestByBranch(
     repo: string,
-    branch: string
+    branch: string,
+    state: "open" | "all" = "all"
   ): Promise<PullRequest | undefined> {
     const prs = await runJson<unknown[]>(
       this.runner,
@@ -199,7 +248,7 @@ export class GitHubClient {
         "--head",
         branch,
         "--state",
-        "all",
+        state,
         "--json",
         PR_JSON_FIELDS,
         "--limit",
@@ -254,7 +303,8 @@ export class GitHubClient {
   ): Promise<PullRequest> {
     const existing = await this.getPullRequestByBranch(
       input.repo,
-      input.headBranch
+      input.headBranch,
+      "open"
     );
     const bodyFile = `/tmp/agent-train-pr-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, input.body);
@@ -304,7 +354,8 @@ export class GitHubClient {
 
       const created = await this.getPullRequestByBranch(
         input.repo,
-        input.headBranch
+        input.headBranch,
+        "open"
       );
       if (!created) {
         throw new Error(

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import type { CommandOptions, CommandResult } from "@/exec.js";
 import { GitHubClient, isPullRequestGreen } from "@/github.js";
 
 import { FakeRunner, pullRequest } from "./helpers.js";
@@ -73,6 +74,48 @@ describe("GitHubClient", () => {
     });
   });
 
+  test("lists all open issues with dependency context", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue(
+      JSON.stringify([
+        {
+          number: 11,
+          title: "Spec",
+          body: "Build it",
+          state: "OPEN",
+          url: "https://github.com/o/r/issues/11",
+          labels: [],
+          blockedBy: [{ number: 10, title: "Base" }],
+          blocking: [],
+          parent: null,
+          subIssues: [],
+        },
+      ])
+    );
+
+    const issues = await new GitHubClient(runner, "/repo").listOpenIssues(
+      "o/r"
+    );
+
+    expect(runner.calls[0]?.args).toEqual([
+      "issue",
+      "list",
+      "--repo",
+      "o/r",
+      "--state",
+      "open",
+      "--json",
+      expect.stringContaining("blockedBy"),
+      "--limit",
+      "1000",
+    ]);
+    expect(issues[0]).toMatchObject({
+      number: 11,
+      title: "Spec",
+      blockedBy: [{ number: 10 }],
+    });
+  });
+
   test("posts PR review JSON through gh api", async () => {
     const runner = new FakeRunner();
     const client = new GitHubClient(runner, "/repo");
@@ -101,6 +144,56 @@ describe("GitHubClient", () => {
     });
   });
 
+  test("posts issue comments through gh api", async () => {
+    const runner = new FakeRunner();
+    const client = new GitHubClient(runner, "/repo");
+
+    await client.createIssueComment("o/r", 33, "validation summary");
+
+    expect(runner.calls[0]?.args).toEqual([
+      "api",
+      "--method",
+      "POST",
+      "/repos/o/r/issues/33/comments",
+      "--input",
+      "-",
+    ]);
+    expect(JSON.parse(runner.calls[0]?.options?.input ?? "{}")).toEqual({
+      body: "validation summary",
+    });
+  });
+
+  test("creates a new PR when a matching branch only has closed PRs", async () => {
+    const runner = new ClosedBranchPrRunner();
+    const client = new GitHubClient(runner, "/repo");
+
+    const pr = await client.createOrUpdatePullRequest({
+      repo: "o/r",
+      title: "Configure Agent PR Train",
+      body: "body",
+      baseBranch: "main",
+      headBranch: "agent-train/setup",
+    });
+
+    expect(pr.number).toBe(211);
+    expect(
+      runner.calls.some(
+        (call) =>
+          call.command === "gh" &&
+          call.args[0] === "pr" &&
+          call.args[1] === "edit"
+      )
+    ).toBe(false);
+    expect(
+      runner.calls.some(
+        (call) =>
+          call.command === "gh" &&
+          call.args[0] === "pr" &&
+          call.args[1] === "create"
+      )
+    ).toBe(true);
+  });
+
   test("blocks merge when required review is still pending", () => {
     expect(
       isPullRequestGreen(
@@ -121,3 +214,86 @@ describe("GitHubClient", () => {
     });
   });
 });
+
+class ClosedBranchPrRunner extends FakeRunner {
+  private created = false;
+
+  override async run(
+    command: string,
+    args: readonly string[] = [],
+    options?: CommandOptions
+  ): Promise<CommandResult> {
+    if (isSetupPrList(command, args)) {
+      this.calls.push({ command, args, options });
+      const state = args[args.indexOf("--state") + 1];
+      const prs =
+        state === "open"
+          ? this.created
+            ? [
+                pullRequest({
+                  number: 211,
+                  headRefName: "agent-train/setup",
+                  headRefOid: "new-sha",
+                }),
+              ]
+            : []
+          : [
+              pullRequest({
+                number: 210,
+                state: "CLOSED",
+                headRefName: "agent-train/setup",
+                headRefOid: "old-sha",
+              }),
+            ];
+
+      return result(command, args, options, JSON.stringify(prs));
+    }
+
+    if (command === "gh" && args[0] === "pr" && args[1] === "edit") {
+      this.calls.push({ command, args, options });
+      return result(
+        command,
+        args,
+        options,
+        "",
+        1,
+        "GraphQL: Cannot change the base branch of a closed pull request. (updatePullRequest)"
+      );
+    }
+
+    if (command === "gh" && args[0] === "pr" && args[1] === "create") {
+      this.calls.push({ command, args, options });
+      this.created = true;
+      return result(command, args, options, "");
+    }
+
+    return super.run(command, args, options);
+  }
+}
+
+function isSetupPrList(command: string, args: readonly string[]): boolean {
+  return (
+    command === "gh" &&
+    args[0] === "pr" &&
+    args[1] === "list" &&
+    args.includes("--head") &&
+    args[args.indexOf("--head") + 1] === "agent-train/setup"
+  );
+}
+
+function result(
+  command: string,
+  args: readonly string[],
+  options: CommandOptions | undefined,
+  stdout: string,
+  exitCode = 0,
+  stderr = ""
+): CommandResult {
+  return {
+    command: [command, ...args],
+    cwd: options?.cwd,
+    stdout,
+    stderr,
+    exitCode,
+  };
+}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildReviewPrompt } from "@/prompts.js";
+import { buildIssueBranchReviewPrompt, buildReviewPrompt } from "@/prompts.js";
 
 import { issue } from "./helpers.js";
 
@@ -22,5 +22,20 @@ describe("prompts", () => {
     expect(prompt).toContain("$code-review");
     expect(prompt).toContain("Issue #9");
     expect(prompt).toContain("PR diff:");
+  });
+
+  test("issue branch review prompt validates repository state without a PR diff", () => {
+    const prompt = buildIssueBranchReviewPrompt({
+      issue: issue({ number: 10, title: "Primary", body: "Build the thing." }),
+      relatedIssues: [
+        issue({ number: 9, title: "Blocker", body: "Create the base." }),
+      ],
+      targetBranch: "main",
+    });
+
+    expect(prompt).toContain("validating target branch main");
+    expect(prompt).toContain("Review only the Spec axis.");
+    expect(prompt).toContain("Issue #9");
+    expect(prompt).not.toContain("PR diff:");
   });
 });

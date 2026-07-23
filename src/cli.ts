@@ -175,6 +175,7 @@ function validationSummary(
     repo: result.repo,
     checkedAt: result.checkedAt,
     pullRequests: result.pullRequests,
+    issues: result.issues,
   };
 }
 

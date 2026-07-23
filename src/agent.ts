@@ -1,9 +1,14 @@
 import { z } from "zod";
 
-import { reviewSandboxBranch } from "./branching.js";
+import { issueReviewSandboxBranch, reviewSandboxBranch } from "./branching.js";
 import { ensureDir, pathExists, readText, writeText } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
-import { buildRepairPrompt, buildReviewPrompt } from "./prompts.js";
+import {
+  buildIssueBranchRepairPrompt,
+  buildIssueBranchReviewPrompt,
+  buildRepairPrompt,
+  buildReviewPrompt,
+} from "./prompts.js";
 import type {
   AgentRunOutcome,
   AgentTrainConfig,
@@ -57,9 +62,31 @@ export interface RepairPullRequestInput {
   readonly findings: readonly ReviewFinding[];
 }
 
+export interface ReviewIssueBranchInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly issue: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly targetBranch: string;
+}
+
+export interface RepairIssueBranchInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly issue: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly branch: string;
+  readonly targetBranch: string;
+  readonly findings: readonly ReviewFinding[];
+}
+
 export interface AgentRunner {
   reviewPullRequest(input: ReviewPullRequestInput): Promise<ReviewReport>;
   repairPullRequest(input: RepairPullRequestInput): Promise<AgentRunOutcome>;
+  reviewIssueBranch(input: ReviewIssueBranchInput): Promise<ReviewReport>;
+  repairIssueBranch(input: RepairIssueBranchInput): Promise<AgentRunOutcome>;
 }
 
 export class SandcastleCodexRunner implements AgentRunner {
@@ -103,6 +130,47 @@ export class SandcastleCodexRunner implements AgentRunner {
       model: input.config.models.repair,
       effort: input.config.reasoning.repair,
       prompt: buildRepairPrompt(input),
+      maxIterations: 3,
+    });
+  }
+
+  async reviewIssueBranch(
+    input: ReviewIssueBranchInput
+  ): Promise<ReviewReport> {
+    const result = await this.runCodex({
+      cwd: input.cwd,
+      config: input.config,
+      runId: input.runId,
+      branch: issueReviewSandboxBranch(input.issue.number),
+      baseBranch: input.targetBranch,
+      name: `review-spec-issue-${input.issue.number}`,
+      model: input.config.models.review,
+      effort: input.config.reasoning.review,
+      prompt: buildIssueBranchReviewPrompt(input),
+      maxIterations: 1,
+      structuredOutput: {
+        tag: "review",
+        schema: ReviewOutputSchema,
+        maxRetries: 2,
+      },
+    });
+
+    return parseReviewReport(result.structuredOutput ?? result.stdout, "spec");
+  }
+
+  async repairIssueBranch(
+    input: RepairIssueBranchInput
+  ): Promise<AgentRunOutcome> {
+    return this.runCodex({
+      cwd: input.cwd,
+      config: input.config,
+      runId: input.runId,
+      branch: input.branch,
+      baseBranch: input.targetBranch,
+      name: `repair-issue-${input.issue.number}`,
+      model: input.config.models.repair,
+      effort: input.config.reasoning.repair,
+      prompt: buildIssueBranchRepairPrompt(input),
       maxIterations: 3,
     });
   }

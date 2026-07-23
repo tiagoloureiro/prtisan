@@ -41,6 +41,11 @@ export interface InitResult {
 
 const SETUP_MARKER = "agent-train:init";
 const DEFAULT_SETUP_BRANCH = "agent-train/setup";
+const DOCS_HTML_URL = "https://tiagoloureiro.github.io/prtisan/";
+const DOCS_MARKDOWN_URL =
+  "https://github.com/tiagoloureiro/prtisan/blob/main/docs/index.md";
+const DOCS_RAW_MARKDOWN_URL =
+  "https://raw.githubusercontent.com/tiagoloureiro/prtisan/main/docs/index.md";
 
 export async function executeInit(
   input: InitInput,
@@ -127,12 +132,10 @@ async function createSetupPullRequest(
     input.remote,
     input.branch
   );
-  await fetchBranch(
-    deps.runner,
-    input.root,
-    input.remote,
-    branchExists ? input.branch : input.targetBranch
-  );
+  await fetchBranch(deps.runner, input.root, input.remote, input.targetBranch);
+  if (branchExists) {
+    await fetchBranch(deps.runner, input.root, input.remote, input.branch);
+  }
 
   try {
     await mustRun(
@@ -144,7 +147,7 @@ async function createSetupPullRequest(
         "--force",
         "--detach",
         tempRoot,
-        `${input.remote}/${branchExists ? input.branch : input.targetBranch}`,
+        `${input.remote}/${input.targetBranch}`,
       ],
       { cwd: input.root }
     );
@@ -174,6 +177,9 @@ async function createSetupPullRequest(
         ["commit", "-m", "Configure Agent PR Train"],
         { cwd: tempRoot }
       );
+    }
+
+    if (changed) {
       await mustRun(
         deps.runner,
         "git",
@@ -187,7 +193,7 @@ async function createSetupPullRequest(
       );
     }
 
-    if (!changed && !branchExists) {
+    if (!changed) {
       return {
         mode: "github",
         root: input.root,
@@ -334,10 +340,72 @@ function buildSetupIssueBody(scaffold: ScaffoldResult): string {
   return [
     `<!-- ${SETUP_MARKER} -->`,
     "",
-    "Configure this repository for Agent PR Train.",
+    "## Purpose",
     "",
-    "Files:",
-    ...scaffold.files.map((file) => `- ${file.path}: ${file.status}`),
+    "Configure this repository for Agent PR Train so local Codex agents can validate PRs against GitHub issue specs, repair blocking gaps, and merge dependent PR stacks with guarded squash merges.",
+    "",
+    "## Canonical Documentation",
+    "",
+    ...setupDocumentationLines(),
+    "",
+    "## What The Setup PR Changes",
+    "",
+    "- Creates `.sandcastle/agent-train.config.json` with repository, target branch, model, concurrency, Docker, and retention defaults.",
+    "- Creates `.sandcastle/Dockerfile` for the Sandcastle agent runtime with Bun, Git, GitHub CLI, and Codex CLI.",
+    "- Updates `.gitignore` so local Sandcastle state, Codex auth, worktrees, logs, and patches stay out of git.",
+    "",
+    "## Required Local Tools And Access",
+    "",
+    "- Bun",
+    "- Git",
+    "- Docker",
+    "- GitHub CLI 2.94+ authenticated for this repository",
+    "- Codex CLI authenticated through a dedicated `.sandcastle/codex-home`",
+    "",
+    "## After Merge Checklist",
+    "",
+    "1. Review `.sandcastle/agent-train.config.json` and adjust `repo`, `targetBranch`, models, concurrency, Docker mounts, or retention as needed.",
+    "2. Seed the dedicated Codex home:",
+    "",
+    "```bash",
+    "mkdir -p .sandcastle/codex-home",
+    'CODEX_HOME="$PWD/.sandcastle/codex-home" codex login',
+    "```",
+    "",
+    "3. Build the sandbox image:",
+    "",
+    "```bash",
+    "docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .",
+    "```",
+    "",
+    "4. Run validation before merging a train:",
+    "",
+    "```bash",
+    "agent-train validate --cwd . --repo OWNER/REPO",
+    "```",
+    "",
+    "5. Merge the validated train when checks are green:",
+    "",
+    "```bash",
+    "agent-train merge --cwd . --repo OWNER/REPO",
+    "```",
+    "",
+    "## GitHub Issue And PR Conventions",
+    "",
+    "- Each implementation PR should close or reference the issue that defines the expected behavior.",
+    "- Use GitHub issue dependencies to describe blocked-by and blocking relationships between specs.",
+    "- Draft PRs remain part of the dependency graph, but merge stops before draft, not-ready, or blocking-validation PRs.",
+    "",
+    "## Troubleshooting",
+    "",
+    "- If issue dependency fields fail, upgrade `gh` and confirm this repository exposes issue dependency metadata.",
+    "- If preflight reports a missing `CODEX_HOME`, create and authenticate `.sandcastle/codex-home` instead of mounting your full personal Codex home.",
+    "- If config is missing, rerun `agent-train init` or pass `--repo OWNER/REPO` to commands that can accept it.",
+    "- If setup has to be regenerated, rerun init; the setup branch is rebuilt from the current target branch and pushed with `--force-with-lease`.",
+    "",
+    "## Scaffolded Files",
+    "",
+    ...scaffold.files.map((file) => `- \`${file.path}\`: ${file.status}`),
   ].join("\n");
 }
 
@@ -353,14 +421,26 @@ function buildSetupPrBody(
     "",
     "## Agent Train Setup",
     "",
+    "Documentation:",
+    ...setupDocumentationLines(),
+    "",
+    "Setup summary:",
     `- Created: ${summary.created ?? 0}`,
     `- Updated: ${summary.updated ?? 0}`,
     `- Unchanged: ${summary.unchanged ?? 0}`,
     `- Skipped: ${summary.skipped ?? 0}`,
     "",
     "Files:",
-    ...scaffold.files.map((file) => `- ${file.path}: ${file.status}`),
+    ...scaffold.files.map((file) => `- \`${file.path}\`: ${file.status}`),
   ].join("\n");
+}
+
+function setupDocumentationLines(): string[] {
+  return [
+    `- HTML documentation: ${DOCS_HTML_URL}`,
+    `- Markdown documentation: ${DOCS_MARKDOWN_URL}`,
+    `- Raw Markdown for agents: ${DOCS_RAW_MARKDOWN_URL}`,
+  ];
 }
 
 export function initSummary(result: InitResult): unknown {
