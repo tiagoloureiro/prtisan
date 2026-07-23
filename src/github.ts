@@ -462,19 +462,17 @@ export class GitHubClient {
   }
 }
 
-export function isPullRequestGreen(
-  pr: PullRequest
-): { ok: true } | { ok: false; reason: string } {
-  if (pr.isDraft)
-    return { ok: false, reason: `PR #${pr.number} is still a draft.` };
+export function pullRequestReadinessBlockers(pr: PullRequest): string[] {
+  const blockers: string[] = [];
+
+  if (pr.isDraft) blockers.push(`PR #${pr.number} is still a draft.`);
   if (pr.reviewDecision === "CHANGES_REQUESTED") {
-    return { ok: false, reason: `PR #${pr.number} has requested changes.` };
+    blockers.push(`PR #${pr.number} has requested changes.`);
   }
   if (pr.reviewDecision === "REVIEW_REQUIRED") {
-    return {
-      ok: false,
-      reason: `PR #${pr.number} is still waiting for required review approval.`,
-    };
+    blockers.push(
+      `PR #${pr.number} is still waiting for required review approval.`
+    );
   }
 
   const mergeState = pr.mergeStateStatus?.toUpperCase();
@@ -482,10 +480,7 @@ export function isPullRequestGreen(
     mergeState &&
     ["BEHIND", "BLOCKED", "DIRTY", "DRAFT", "UNKNOWN"].includes(mergeState)
   ) {
-    return {
-      ok: false,
-      reason: `PR #${pr.number} is not mergeable yet (${mergeState}).`,
-    };
+    blockers.push(`PR #${pr.number} is not mergeable yet (${mergeState}).`);
   }
 
   const checks = pr.statusCheckRollup ?? [];
@@ -501,12 +496,20 @@ export function isPullRequestGreen(
   });
 
   if (failing.length > 0) {
-    return {
-      ok: false,
-      reason: `PR #${pr.number} has ${failing.length} non-green status check(s).`,
-    };
+    blockers.push(
+      `PR #${pr.number} has ${failing.length} non-green status check(s).`
+    );
   }
 
+  return blockers;
+}
+
+export function isPullRequestGreen(
+  pr: PullRequest
+): { ok: true } | { ok: false; reason: string } {
+  const blockers = pullRequestReadinessBlockers(pr);
+  const reason = blockers[0];
+  if (reason) return { ok: false, reason };
   return { ok: true };
 }
 

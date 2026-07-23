@@ -1,6 +1,6 @@
 import { runIdFromDate, syntheticBaseBranch } from "@/branching.js";
 import { GitClient } from "@/git.js";
-import { GitHubClient, isPullRequestGreen } from "@/github.js";
+import { GitHubClient, pullRequestReadinessBlockers } from "@/github.js";
 import {
   descendantsOfOpenPr,
   loadOpenPrGraph,
@@ -111,21 +111,31 @@ async function loadCurrentGraph(
 }
 
 function assertReadyToMerge(node: OpenPrNode): void {
+  const blockers: string[] = [];
   const validation = node.validation;
   if (validation.state === "missing") {
-    throw new Error(
+    blockers.push(
       `PR #${node.pr.number} has no agent-train validation review yet.`
     );
   }
   if (validation.state === "blocked") {
-    throw new Error(
+    blockers.push(
       `PR #${node.pr.number} has ${validation.blockingFindings} blocking agent validation finding(s).`
     );
   }
 
-  const green = isPullRequestGreen(node.pr);
-  if (!green.ok) {
-    throw new Error(green.reason);
+  blockers.push(...pullRequestReadinessBlockers(node.pr));
+
+  if (blockers.length === 1) {
+    throw new Error(blockers[0] as string);
+  }
+  if (blockers.length > 1) {
+    throw new Error(
+      [
+        `PR #${node.pr.number} is not ready to merge:`,
+        ...blockers.map((blocker) => `- ${blocker}`),
+      ].join("\n")
+    );
   }
 }
 

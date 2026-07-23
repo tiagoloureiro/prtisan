@@ -31,4 +31,37 @@ describe("merge command", () => {
       )
     ).rejects.toThrow("PR #4 is still a draft.");
   });
+
+  test("reports all blockers for the next PR in the merge train", async () => {
+    const blocked = pullRequest({
+      number: 117,
+      isDraft: true,
+      statusCheckRollup: [
+        {
+          __typename: "CheckRun",
+          conclusion: "FAILURE",
+          name: "check",
+          status: "COMPLETED",
+        },
+      ],
+    });
+    const github = {
+      listOpenPullRequests: async () => [blocked],
+    } as unknown as GitHubClient;
+    const git = {} as unknown as GitClient;
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+        { github, git }
+      )
+    ).rejects.toThrow(
+      [
+        "PR #117 is not ready to merge:",
+        "- PR #117 has no agent-train validation review yet.",
+        "- PR #117 is still a draft.",
+        "- PR #117 has 1 non-green status check(s).",
+      ].join("\n")
+    );
+  });
 });
