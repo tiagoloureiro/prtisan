@@ -100,8 +100,20 @@ export async function assertRuntimeReady(input: {
   readonly config: AgentTrainConfig;
   readonly runner: CommandRunner;
   readonly github?: Pick<GitHubClient, "assertReady">;
+  readonly log?: (message: string) => void;
 }): Promise<void> {
-  const diagnostics = await checkRuntimeReadiness(input);
+  let diagnostics = await checkRuntimeReadiness(input);
+  const imageDiagnostic = diagnostics.find(
+    (item) => item.name === "Docker image"
+  );
+  if (isMissingDockerImageDiagnostic(imageDiagnostic)) {
+    const buildDiagnostic = await buildDockerImage(input);
+    diagnostics =
+      buildDiagnostic.status === "ok"
+        ? await checkRuntimeReadiness(input)
+        : [...diagnostics, buildDiagnostic];
+  }
+
   const failed = diagnostics.filter((item) => item.status === "failed");
   if (failed.length === 0) return;
 
@@ -140,6 +152,51 @@ async function commandDiagnostic(
         : (result.stderr || result.stdout).trim() ||
           `${command} ${args.join(" ")} failed`,
   };
+}
+
+async function buildDockerImage(input: {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runner: CommandRunner;
+  readonly log?: (message: string) => void;
+}): Promise<RuntimeReadinessDiagnostic> {
+  const imageName = input.config.docker.imageName;
+  input.log?.(
+    `Docker image ${imageName} is missing; building from .sandcastle/Dockerfile`
+  );
+  const result = await input.runner.run(
+    "docker",
+    [
+      "build",
+      "-t",
+      imageName,
+      "--build-arg",
+      `AGENT_UID=${runtimeUid()}`,
+      "--build-arg",
+      `AGENT_GID=${runtimeGid()}`,
+      "-f",
+      ".sandcastle/Dockerfile",
+      ".",
+    ],
+    { cwd: input.cwd }
+  );
+
+  return {
+    name: "Docker image build",
+    status: result.exitCode === 0 ? "ok" : "failed",
+    details:
+      result.exitCode === 0
+        ? `Built ${imageName} from .sandcastle/Dockerfile.`
+        : (result.stderr || result.stdout).trim() ||
+          `docker build -t ${imageName} -f .sandcastle/Dockerfile . failed`,
+  };
+}
+
+function isMissingDockerImageDiagnostic(
+  diagnostic: RuntimeReadinessDiagnostic | undefined
+): boolean {
+  if (!diagnostic || diagnostic.status !== "failed") return false;
+  return /no such image|not found/i.test(diagnostic.details ?? "");
 }
 
 async function dockerImageDefaultCommandDiagnostic(

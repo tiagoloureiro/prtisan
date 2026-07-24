@@ -59,7 +59,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const git = new GitClient(runner, cwd, config);
   const agent = new SandcastleCodexRunner();
 
-  await assertRuntimeReady({ cwd, config, runner, github });
+  await assertRuntimeReady({ cwd, config, runner, github, log: console.error });
   await pruneRuntimeArtifacts({ cwd, config, runner }).catch((error) => {
     console.error(
       `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`

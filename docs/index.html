@@ -579,8 +579,13 @@ agent-train init --cwd /path/to/repo</code></pre>
         <section id="codex-and-sandcastle">
           <h2>Codex And Sandcastle Setup</h2>
           <pre><code>mkdir -p .sandcastle/codex-home
-CODEX_HOME="$PWD/.sandcastle/codex-home" codex login
-docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .</code></pre>
+CODEX_HOME="$PWD/.sandcastle/codex-home" codex login</code></pre>
+          <p>
+            <code>agent-train validate</code> and
+            <code>agent-train merge</code> build the configured Sandcastle
+            Docker image from <code>.sandcastle/Dockerfile</code> when it is
+            missing.
+          </p>
           <p>
             Do not mount your full personal <code>~/.codex</code> into agent
             containers. The dedicated Codex home keeps unrelated auth, logs, and
@@ -605,8 +610,13 @@ docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .</code></pre>
               <code>.sandcastle/codex-home</code> and authenticate it.
             </li>
             <li>
-              Docker image not found: rebuild the Sandcastle image from the
-              scaffolded Dockerfile.
+              Docker image build failed: fix
+              <code>.sandcastle/Dockerfile</code>, then rerun the command or
+              build it manually with
+              <code
+                >docker build -t sandcastle:agent-train -f
+                .sandcastle/Dockerfile .</code
+              >.
             </li>
             <li>
               Setup branch looks stale: rerun <code>agent-train init</code>.

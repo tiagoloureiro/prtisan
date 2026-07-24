@@ -67,6 +67,57 @@ describe("runtime readiness", () => {
     );
   });
 
+  test("builds a missing Docker image before asserting runtime readiness", async () => {
+    const runner = new FakeRunner();
+    const logs: string[] = [];
+    runner.enqueue("git version 2.50.0\n");
+    runner.enqueue("Docker version 27.0.0\n");
+    runner.enqueue("codex 1.0.0\n");
+    runner.enqueue(
+      "",
+      1,
+      "Error response from daemon: No such image: sandcastle:agent-train"
+    );
+    runner.enqueue("");
+    runner.enqueue("Successfully built image\n");
+    runner.enqueue("git version 2.50.0\n");
+    runner.enqueue("Docker version 27.0.0\n");
+    runner.enqueue("codex 1.0.0\n");
+    runner.enqueue("[]\n");
+    runner.enqueue("container-id\n");
+    runner.enqueue("true\n");
+    runner.enqueue("");
+    runner.enqueue("container-id\n");
+    runner.enqueue("");
+
+    await assertRuntimeReady({
+      cwd: "/repo",
+      config: testConfig(),
+      runner,
+      log: (message) => logs.push(message),
+    });
+
+    expect(logs).toEqual([
+      "Docker image sandcastle:agent-train is missing; building from .sandcastle/Dockerfile",
+    ]);
+    expect(runner.calls).toContainEqual({
+      command: "docker",
+      args: [
+        "build",
+        "-t",
+        "sandcastle:agent-train",
+        "--build-arg",
+        `AGENT_UID=${process.getuid?.() ?? 1000}`,
+        "--build-arg",
+        `AGENT_GID=${process.getgid?.() ?? 1000}`,
+        "-f",
+        ".sandcastle/Dockerfile",
+        ".",
+      ],
+      options: { cwd: "/repo" },
+    });
+  });
+
   test("fails when the Docker image cannot write global Git config", async () => {
     const runner = new FakeRunner();
     runner.enqueue("git version 2.50.0\n");

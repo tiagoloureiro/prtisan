@@ -118,11 +118,8 @@ mkdir -p .sandcastle/codex-home
 CODEX_HOME="$PWD/.sandcastle/codex-home" codex login
 ```
 
-Build the sandbox image:
-
-```bash
-docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .
-```
+`agent-train validate` and `agent-train merge` build the configured Sandcastle
+Docker image from `.sandcastle/Dockerfile` when it is missing.
 
 Do not mount your full personal `~/.codex` into agent containers. The dedicated `.sandcastle/codex-home` keeps unrelated auth, logs, and sessions out of the sandbox.
 
@@ -131,7 +128,7 @@ Do not mount your full personal `~/.codex` into agent containers. The dedicated 
 - `Missing agent train config`: run `agent-train init`, fix `.sandcastle/agent-train.config.json`, or pass `--repo OWNER/REPO`.
 - GitHub issue dependency field errors: upgrade GitHub CLI to 2.94 or newer and confirm repository permissions can read issue dependency metadata.
 - Missing `CODEX_HOME`: create `.sandcastle/codex-home` and authenticate it with `codex login`.
-- Docker image not found: rebuild with `docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .`.
+- Docker image build failed: fix `.sandcastle/Dockerfile`, then rerun the command or build it manually with `docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .`.
 - Setup branch looks stale: rerun `agent-train init`; the setup branch is rebuilt from the target branch and pushed with `--force-with-lease`.
 - Validation is too aggressive: run `agent-train validate --no-repair` to collect review output without repair commits.
 - `agent-train tui` refuses to start: run it from an interactive terminal, or use `agent-train validate` or `agent-train merge` for non-interactive automation.

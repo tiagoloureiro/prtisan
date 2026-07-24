@@ -91,8 +91,10 @@ Use a dedicated `.sandcastle/codex-home` and seed it with Codex authentication b
 ```bash
 mkdir -p .sandcastle/codex-home
 CODEX_HOME="$PWD/.sandcastle/codex-home" codex login
-docker build -t sandcastle:agent-train -f .sandcastle/Dockerfile .
 ```
+
+`agent-train validate` and `agent-train merge` build the configured Sandcastle
+Docker image from `.sandcastle/Dockerfile` when it is missing.
 
 ## Development
 
