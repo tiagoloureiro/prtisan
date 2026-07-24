@@ -111,7 +111,10 @@ export async function assertRuntimeReady(input: {
     diagnostics =
       buildDiagnostic.status === "ok"
         ? await checkRuntimeReadiness(input)
-        : [...diagnostics, buildDiagnostic];
+        : [
+            ...diagnostics.filter((item) => item !== imageDiagnostic),
+            buildDiagnostic,
+          ];
   }
 
   const failed = diagnostics.filter((item) => item.status === "failed");
@@ -187,9 +190,25 @@ async function buildDockerImage(input: {
     details:
       result.exitCode === 0
         ? `Built ${imageName} from .sandcastle/Dockerfile.`
-        : (result.stderr || result.stdout).trim() ||
-          `docker build -t ${imageName} -f .sandcastle/Dockerfile . failed`,
+        : dockerBuildFailureDetails(result.stderr || result.stdout, imageName),
   };
+}
+
+function dockerBuildFailureDetails(output: string, imageName: string): string {
+  const details =
+    output.trim() ||
+    `docker build -t ${imageName} -f .sandcastle/Dockerfile . failed`;
+  if (
+    /groupadd: GID '\d+' already exists|useradd: UID \d+ is not unique/i.test(
+      details
+    )
+  ) {
+    return [
+      details,
+      "The scaffolded Dockerfile creates the agent user/group directly and is incompatible with host UID/GID build args. Refresh the target repository scaffold so the Dockerfile uses the current numeric USER form.",
+    ].join("\n");
+  }
+  return details;
 }
 
 function isMissingDockerImageDiagnostic(

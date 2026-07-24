@@ -118,6 +118,40 @@ describe("runtime readiness", () => {
     });
   });
 
+  test("reports the Docker build failure after a missing image build attempt", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue("git version 2.50.0\n");
+    runner.enqueue("Docker version 27.0.0\n");
+    runner.enqueue("codex 1.0.0\n");
+    runner.enqueue(
+      "",
+      1,
+      "Error response from daemon: No such image: sandcastle:agent-train"
+    );
+    runner.enqueue("");
+    runner.enqueue("", 1, "groupadd: GID '1000' already exists");
+
+    let error: unknown;
+    try {
+      await assertRuntimeReady({
+        cwd: "/repo",
+        config: testConfig(),
+        runner,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("Docker image build: groupadd");
+    expect((error as Error).message).toContain(
+      "Refresh the target repository scaffold"
+    );
+    expect((error as Error).message).not.toContain(
+      "Docker image: Error response from daemon"
+    );
+  });
+
   test("fails when the Docker image cannot write global Git config", async () => {
     const runner = new FakeRunner();
     runner.enqueue("git version 2.50.0\n");
