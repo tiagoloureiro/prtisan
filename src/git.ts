@@ -1,10 +1,12 @@
 import type { CommandRunner } from "./exec.js";
 import { mustRun } from "./exec.js";
 import { ensureDir } from "./fs.js";
-import { dirname, joinPath } from "./path.js";
+import { dirname, joinPath, normalizePath } from "./path.js";
 import type { AgentTrainConfig } from "./types.js";
 
 export class GitClient {
+  private repoRootPath?: string;
+
   constructor(
     private readonly runner: CommandRunner,
     private readonly cwd: string,
@@ -329,6 +331,18 @@ export class GitClient {
     startPoint: string
   ): Promise<void> {
     const exists = await this.localBranchExists(branch);
+    if (exists) {
+      const checkedOutWorktreePath = await this.checkedOutWorktreePath(branch);
+      if (checkedOutWorktreePath) {
+        await this.resetCheckedOutManagedBranch(
+          branch,
+          startPoint,
+          checkedOutWorktreePath
+        );
+        return;
+      }
+    }
+
     await mustRun(
       this.runner,
       "git",
@@ -339,6 +353,76 @@ export class GitClient {
         cwd: this.cwd,
       }
     );
+  }
+
+  private async resetCheckedOutManagedBranch(
+    branch: string,
+    startPoint: string,
+    worktreePath: string
+  ): Promise<void> {
+    if (!(await this.isManagedBranchWorktree(worktreePath))) {
+      throw new Error(
+        `Cannot prepare branch "${branch}" because it is checked out at ${worktreePath}. Switch that worktree to another branch or remove it before running agent-train.`
+      );
+    }
+
+    await mustRun(this.runner, "git", ["reset", "--hard", startPoint], {
+      cwd: worktreePath,
+    });
+    await mustRun(this.runner, "git", ["clean", "-fd"], {
+      cwd: worktreePath,
+    });
+  }
+
+  private async checkedOutWorktreePath(
+    branch: string
+  ): Promise<string | undefined> {
+    const result = await mustRun(
+      this.runner,
+      "git",
+      ["worktree", "list", "--porcelain"],
+      {
+        cwd: this.cwd,
+      }
+    );
+    let worktreePath: string | undefined;
+    for (const line of result.stdout.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) {
+        worktreePath = normalizePath(line.slice("worktree ".length));
+      } else if (line === `branch refs/heads/${branch}`) {
+        return worktreePath;
+      } else if (line.length === 0) {
+        worktreePath = undefined;
+      }
+    }
+    return undefined;
+  }
+
+  private async isManagedBranchWorktree(
+    worktreePath: string
+  ): Promise<boolean> {
+    const managedRoot = joinPath(
+      await this.repoRoot(),
+      ".sandcastle",
+      "worktrees"
+    );
+    const normalizedPath = normalizePath(worktreePath);
+    return normalizedPath.startsWith(`${managedRoot}/`);
+  }
+
+  private async repoRoot(): Promise<string> {
+    if (this.repoRootPath) return this.repoRootPath;
+
+    const result = await mustRun(
+      this.runner,
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      {
+        cwd: this.cwd,
+      }
+    );
+    this.repoRootPath = normalizePath(result.stdout.trim());
+    return this.repoRootPath;
   }
 
   private async localBranchExists(branch: string): Promise<boolean> {
