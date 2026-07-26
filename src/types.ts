@@ -28,6 +28,16 @@ export interface DockerMountConfig {
   readonly readonly?: boolean;
 }
 
+export interface SandboxCommandConfig {
+  readonly name: string;
+  readonly command: string;
+  readonly timeoutMs: number;
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+export type ValidationScope = "prs" | "issues" | "all";
+export type SessionRetentionPolicy = "none" | "failures" | "all";
+
 export interface AgentTrainConfig {
   readonly repo: string;
   readonly targetBranch: string;
@@ -50,10 +60,30 @@ export interface AgentTrainConfig {
     readonly cpus?: number;
     readonly mounts: readonly DockerMountConfig[];
   };
+  readonly runtime: {
+    readonly autoProvision: boolean;
+    readonly verificationMode: "auto" | "explicit";
+    readonly probes: readonly SandboxCommandConfig[];
+    readonly bootstrap?: SandboxCommandConfig;
+    readonly verification: readonly SandboxCommandConfig[];
+  };
+  readonly validation: {
+    readonly maxRepairRounds: number;
+    readonly maxAgentRunsPerHead: number;
+    readonly maxWallTimeMs: number;
+    readonly promptCharBudget: number;
+    readonly maxCheckLogChars: number;
+    readonly maxCheckEvidenceChars: number;
+    readonly leaseTtlMs: number;
+    readonly cacheTtlDays: number;
+  };
   readonly retention: {
     readonly ttlDays: number;
     readonly maxLogBytes: number;
     readonly keepSessions: boolean;
+    readonly sessionPolicy: SessionRetentionPolicy;
+    readonly maxRuns: number;
+    readonly maxTotalBytes: number;
   };
 }
 
@@ -105,6 +135,9 @@ export interface ReviewFinding {
   readonly severity: FindingSeverity;
   readonly title: string;
   readonly body: string;
+  readonly findingId?: string;
+  readonly rule?: string;
+  readonly evidence?: string;
   readonly path?: string;
   readonly line?: number;
   readonly side?: "RIGHT" | "LEFT";
@@ -114,6 +147,16 @@ export interface ReviewReport {
   readonly axis: ReviewAxis;
   readonly summary: string;
   readonly findings: readonly ReviewFinding[];
+  readonly promptChars?: number;
+  readonly durationMs?: number;
+}
+
+export interface RepairVerificationReport {
+  readonly summary: string;
+  readonly resolvedFindingIds: readonly string[];
+  readonly findings: readonly ReviewFinding[];
+  readonly promptChars?: number;
+  readonly durationMs?: number;
 }
 
 export interface AgentRunOutcome {
@@ -123,4 +166,52 @@ export interface AgentRunOutcome {
   readonly structuredOutput?: unknown;
   readonly logFilePath?: string;
   readonly sessionId?: string;
+  readonly promptChars?: number;
+  readonly durationMs?: number;
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly cacheCreationInputTokens: number;
+    readonly cacheReadInputTokens: number;
+    readonly outputTokens: number;
+  };
 }
+
+export interface VerificationResult {
+  readonly status: "passed" | "failed" | "infra_failed";
+  readonly commands: readonly {
+    readonly name: string;
+    readonly command: string;
+    readonly exitCode: number;
+    readonly durationMs: number;
+    readonly timedOut: boolean;
+    readonly output: string;
+  }[];
+}
+
+export interface ValidationMetrics {
+  readonly durationMs: number;
+  readonly agentRuns: number;
+  readonly cacheHits: number;
+  readonly promptChars: number;
+  readonly stageTimingsMs: Readonly<Record<string, number>>;
+}
+
+interface ValidationOutcomeBase {
+  readonly snapshotKey: string;
+  readonly metrics: ValidationMetrics;
+  readonly verification?: VerificationResult;
+}
+
+export type ValidationOutcome =
+  | (ValidationOutcomeBase & {
+      readonly kind: "passed" | "repaired";
+    })
+  | (ValidationOutcomeBase & {
+      readonly kind: "blocked" | "needs_human";
+      readonly reason: string;
+      readonly findings: readonly ReviewFinding[];
+    })
+  | (ValidationOutcomeBase & {
+      readonly kind: "stale" | "infra_failed" | "budget_exhausted";
+      readonly reason: string;
+    });

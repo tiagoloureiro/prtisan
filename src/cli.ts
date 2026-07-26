@@ -7,8 +7,13 @@ import { BunCommandRunner } from "./exec.js";
 import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
 import { assertRuntimeReady } from "./preflight.js";
+import { FileRepairAttemptStore } from "./repair-attempt-store.js";
 import { pruneRuntimeArtifacts } from "./retention.js";
+import { FileReviewCache } from "./review-cache.js";
+import { DockerRuntimeProvider, DockerVerificationRunner } from "./runtime.js";
 import { runTui } from "./tui/index.js";
+import type { ValidationScope } from "./types.js";
+import { ValidationLeaseManager } from "./validation-lease.js";
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const parsed = parseCliArgs(argv);
@@ -30,6 +35,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
       targetBranch: parsed.options.targetBranch,
       repair: parsed.options.repair,
       validateAffected: parsed.options.validateAffected,
+      scope: parsed.options.scope,
     });
   }
 
@@ -57,9 +63,21 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
     targetBranch: parsed.options.targetBranch,
   });
   const git = new GitClient(runner, cwd, config);
-  const agent = new SandcastleCodexRunner();
+  const agent = new SandcastleCodexRunner(runner);
+  const runtime = new DockerRuntimeProvider(runner);
+  const verification = new DockerVerificationRunner(runner);
+  const cache = new FileReviewCache(cwd, config.validation.cacheTtlDays);
+  const lease = new ValidationLeaseManager(cwd, config.validation.leaseTtlMs);
+  const repairAttempts = new FileRepairAttemptStore(cwd);
 
-  await assertRuntimeReady({ cwd, config, runner, github, log: console.error });
+  await assertRuntimeReady({
+    cwd,
+    config,
+    runner,
+    github,
+    runtime,
+    log: console.error,
+  });
   await pruneRuntimeArtifacts({ cwd, config, runner }).catch((error) => {
     console.error(
       `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`
@@ -72,8 +90,18 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         cwd,
         config,
         repair: parsed.options.repair,
+        scope: parsed.options.scope,
       },
-      { github, git, agent, log: console.error }
+      {
+        github,
+        git,
+        agent,
+        runtime,
+        verification,
+        cache,
+        lease,
+        log: console.error,
+      }
     );
     console.log(JSON.stringify(validationSummary(result), null, 2));
     return 0;
@@ -81,14 +109,23 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
 
   if (parsed.command === "merge") {
     const validatePullRequests = async (pullNumbers: readonly number[]) => {
-      await executeValidate(
+      return executeValidate(
         {
           cwd,
           config,
           pullNumbers,
           repair: true,
         },
-        { github, git, agent, log: console.error }
+        {
+          github,
+          git,
+          agent,
+          runtime,
+          verification,
+          cache,
+          lease,
+          log: console.error,
+        }
       );
     };
 
@@ -98,7 +135,16 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
         config,
         validateAffected: parsed.options.validateAffected,
       },
-      { github, git, agent, validatePullRequests, log: console.error }
+      {
+        github,
+        git,
+        agent,
+        runtime,
+        verification,
+        repairAttempts,
+        validatePullRequests,
+        log: console.error,
+      }
     );
     console.log(JSON.stringify(mergeSummary(result), null, 2));
     return 0;
@@ -123,6 +169,7 @@ interface ParsedOptions {
   force?: boolean;
   repair?: boolean;
   validateAffected?: boolean;
+  scope?: ValidationScope;
 }
 
 export function parseCliArgs(argv: readonly string[]): ParsedArgs {
@@ -155,6 +202,14 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
       options.repair = false;
     } else if (arg === "--no-validate-affected") {
       options.validateAffected = false;
+    } else if (arg === "--scope") {
+      const scope = requireValue(rest, ++index, arg);
+      if (!["prs", "issues", "all"].includes(scope)) {
+        throw new Error(
+          `--scope must be one of prs, issues, or all; received ${scope}.`
+        );
+      }
+      options.scope = scope as ValidationScope;
     } else {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -204,8 +259,8 @@ function printHelp(): void {
 
 Usage:
   agent-train init [--cwd <repo>] [--repo OWNER/REPO] [--target-branch <branch>] [--branch <branch>] [--remote <name>] [--force]
-  agent-train validate [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-repair]
+  agent-train validate [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--scope prs|issues|all] [--no-repair]
   agent-train merge [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-validate-affected]
-  agent-train tui [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--target-branch <branch>]
+  agent-train tui [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--target-branch <branch>] [--scope prs|issues|all]
 `);
 }

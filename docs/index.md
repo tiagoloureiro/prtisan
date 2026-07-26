@@ -50,13 +50,13 @@ For a non-git directory, or a git repository not connected to GitHub through `gh
 
 Generated files:
 
-- `.sandcastle/agent-train.config.json` stores repo, target branch, remote, model, reasoning, concurrency, Docker, mount, and retention settings.
+- `.sandcastle/agent-train.config.json` stores repo, target branch, remote, model, reasoning, concurrency, Docker, runtime discovery, validation budgets, mount, and retention settings.
 - `.sandcastle/Dockerfile` defines the Sandcastle agent image with Bun, Git, GitHub CLI, and Codex CLI.
 - `.gitignore` receives Agent PR Train runtime ignores for `.sandcastle/.env`, Codex home, runs, worktrees, logs, and patches.
 
 ## Configuration
 
-The default config targets `origin`, keeps runtime state under `.sandcastle`, and uses bounded concurrency for validation and GitHub API operations. Review and repair models, reasoning effort, Docker image name, CPU budget, extra mounts, and retention policy can all be edited in `.sandcastle/agent-train.config.json`.
+The default config targets `origin`, keeps runtime state under `.sandcastle`, and uses bounded concurrency for validation and GitHub API operations. Optional `runtime`, `validation`, and `retention` blocks configure explicit probes/commands, lower hard budgets, and aggregate retention. Existing configs remain valid; legacy `keepSessions: true` means failure-only session retention.
 
 If the config still contains `OWNER/REPO`, update it before running validation or pass `--repo OWNER/REPO` to commands that support it.
 
@@ -79,9 +79,13 @@ agent-train validate --cwd /path/to/repo --repo OWNER/REPO
 
 `validate` loads all open pull requests, including drafts. It derives dependencies from PR base/head branch relationships, then enriches that graph with linked issue dependencies. For every selected PR it runs a Standards review, and when a closing issue is present it also runs a Spec review against the issue and directly related issues.
 
-By default, validation repairs blocking PR findings when possible and posts a GitHub PR review with a validation marker tied to the current PR head SHA. It also checks open issues against the target branch, comments with the result, and can create or update an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and there is no associated open PR.
+By default, validation processes PRs only. It repairs blocking PR findings when possible and posts a versioned GitHub review marker tied to the current head/base SHA plus policy, issue-context, and runtime digests.
+
+Use `--scope issues` to check open issues against the target branch, or `--scope all` for PR and issue validation together. Issue sweeps skip issues already represented by an open PR and can create or update an `agent-train/repair/issue-N` PR when verified target-branch gaps remain.
 
 Use `--no-repair` when validation should report findings without letting repair agents commit changes.
+
+Prtisan discovers exact Node/Bun and package-manager versions from repository manifests and version files, builds a cached derivative runtime when needed, bootstraps dependencies before the model runs, and selects safe checks (`check`, or format/lint/typecheck, followed by test/build). Conflicts, missing tools, bootstrap failures, timeouts, and failed verification prevent publication. Each PR snapshot is limited to Standards, Spec when applicable, one repair batch, and one targeted verifier.
 
 ## Merge
 

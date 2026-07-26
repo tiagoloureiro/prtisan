@@ -2,8 +2,14 @@ import type { AgentRunner } from "@/agent.js";
 import { runIdFromDate } from "@/branching.js";
 import { GitClient } from "@/git.js";
 import { GitHubClient } from "@/github.js";
-import { preparePullRequestForMerge } from "@/merge-readiness.js";
+import {
+  preparePullRequestForMerge,
+  type PullRequestValidationGateResult,
+} from "@/merge-readiness.js";
 import { loadOpenPrGraph, type OpenPrGraph } from "@/open-pr-graph.js";
+import type { RepairAttemptStore } from "@/repair-attempt-store.js";
+import { writeRunRecord } from "@/run-record.js";
+import type { RuntimeProvider, VerificationRunner } from "@/runtime.js";
 import { restackAfterMerge } from "@/train-restacker.js";
 import type { AgentTrainConfig } from "@/types.js";
 
@@ -18,9 +24,13 @@ export interface MergeDeps {
   readonly github: GitHubClient;
   readonly git: GitClient;
   readonly agent?: AgentRunner;
+  readonly runtime?: RuntimeProvider;
+  readonly verification?: VerificationRunner;
+  readonly repairAttempts?: RepairAttemptStore;
   readonly validatePullRequests?: (
     pullNumbers: readonly number[]
-  ) => Promise<void>;
+  ) => Promise<PullRequestValidationGateResult>;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
   readonly log?: (message: string) => void;
 }
 
@@ -41,6 +51,40 @@ export async function executeMerge(
   deps: MergeDeps
 ): Promise<MergeResult> {
   const runId = input.runId ?? runIdFromDate("merge");
+  const startedAt = new Date().toISOString();
+  try {
+    const result = await executeMergeRun(input, deps, runId);
+    await writeRunRecord(input.cwd, {
+      schemaVersion: 1,
+      runId,
+      command: "merge",
+      repo: input.config.repo,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      status: "completed",
+      result,
+    }).catch(() => undefined);
+    return result;
+  } catch (error) {
+    await writeRunRecord(input.cwd, {
+      schemaVersion: 1,
+      runId,
+      command: "merge",
+      repo: input.config.repo,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      status: "failed",
+      error: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function executeMergeRun(
+  input: MergeInput,
+  deps: MergeDeps,
+  runId: string
+): Promise<MergeResult> {
   const merged: MergedPullRequest[] = [];
   let graph = await loadCurrentGraph(input, deps);
 

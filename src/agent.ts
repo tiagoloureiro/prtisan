@@ -1,6 +1,8 @@
+import { unlink } from "node:fs/promises";
 import { z } from "zod";
 
 import { issueReviewSandboxBranch, reviewSandboxBranch } from "./branching.js";
+import { BunCommandRunner, type CommandRunner } from "./exec.js";
 import { ensureDir, pathExists, readText, writeText } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
 import {
@@ -9,18 +11,22 @@ import {
   buildIssueBranchReviewPrompt,
   buildMergeStateRepairPrompt,
   buildRepairPrompt,
+  buildRepairVerificationPrompt,
   buildReviewPrompt,
 } from "./prompts.js";
+import type { PreparedRuntime } from "./runtime.js";
 import type {
   AgentRunOutcome,
   AgentTrainConfig,
   Issue,
   PullRequestCheckEvidence,
   ReasoningEffort,
+  RepairVerificationReport,
   ReviewAxis,
   ReviewFinding,
   ReviewReport,
 } from "./types.js";
+import { isHighRiskPath } from "./validation-hardening.js";
 
 const SANDBOX_CODEX_HOME = "/home/agent/.codex-agent-train";
 const ReviewOutputSchema = z.object({
@@ -32,6 +38,8 @@ const ReviewOutputSchema = z.object({
         severity: z.enum(["blocking", "advisory"]).default("blocking"),
         title: z.string().default("Review finding"),
         body: z.string().default(""),
+        rule: z.string().optional(),
+        evidence: z.string().optional(),
         path: z.string().optional(),
         line: z.number().int().positive().optional(),
         side: z.enum(["RIGHT", "LEFT"]).optional(),
@@ -39,6 +47,45 @@ const ReviewOutputSchema = z.object({
     )
     .default([]),
 });
+const RepairOutputSchema = z.object({
+  addressedFindingIds: z.array(z.string()).default([]),
+  changedPaths: z.array(z.string()).default([]),
+  summary: z.string().default(""),
+  limitations: z.array(z.string()).default([]),
+});
+const RepairVerificationOutputSchema = z.object({
+  summary: z.string().default(""),
+  resolvedFindingIds: z.array(z.string()).default([]),
+  findings: ReviewOutputSchema.shape.findings,
+});
+
+export class AgentOutputError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AgentOutputError";
+  }
+}
+
+export class AgentPromptBudgetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentPromptBudgetError";
+  }
+}
+
+export class AgentInfrastructureError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AgentInfrastructureError";
+  }
+}
+
+export class AgentExecutionError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AgentExecutionError";
+  }
+}
 
 export interface ReviewPullRequestInput {
   readonly cwd: string;
@@ -51,6 +98,11 @@ export interface ReviewPullRequestInput {
   readonly baseBranch: string;
   readonly diff: string;
   readonly axis: ReviewAxis;
+  readonly baseRefOid?: string;
+  readonly headRefOid?: string;
+  readonly changedFiles?: readonly string[];
+  readonly effort?: ReasoningEffort;
+  readonly runtime?: PreparedRuntime;
 }
 
 export interface RepairPullRequestInput {
@@ -63,6 +115,7 @@ export interface RepairPullRequestInput {
   readonly branch: string;
   readonly baseBranch: string;
   readonly findings: readonly ReviewFinding[];
+  readonly runtime?: PreparedRuntime;
 }
 
 export interface RepairCiFailureInput {
@@ -75,6 +128,7 @@ export interface RepairCiFailureInput {
   readonly branch: string;
   readonly baseBranch: string;
   readonly checkEvidence: readonly PullRequestCheckEvidence[];
+  readonly runtime?: PreparedRuntime;
 }
 
 export interface RepairMergeStateInput {
@@ -88,6 +142,7 @@ export interface RepairMergeStateInput {
   readonly baseBranch: string;
   readonly mergeState: string;
   readonly blockers: readonly string[];
+  readonly runtime?: PreparedRuntime;
 }
 
 export interface ReviewIssueBranchInput {
@@ -97,6 +152,7 @@ export interface ReviewIssueBranchInput {
   readonly issue: Issue;
   readonly relatedIssues: readonly Issue[];
   readonly targetBranch: string;
+  readonly runtime?: PreparedRuntime;
 }
 
 export interface RepairIssueBranchInput {
@@ -108,6 +164,22 @@ export interface RepairIssueBranchInput {
   readonly branch: string;
   readonly targetBranch: string;
   readonly findings: readonly ReviewFinding[];
+  readonly runtime?: PreparedRuntime;
+}
+
+export interface VerifyRepairInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly issue?: Issue;
+  readonly relatedIssues: readonly Issue[];
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly baseRefOid: string;
+  readonly repairedHeadRefOid: string;
+  readonly findings: readonly ReviewFinding[];
+  readonly runtime?: PreparedRuntime;
 }
 
 export type AgentReviewTask =
@@ -123,9 +195,14 @@ export type AgentRepairTask =
 export interface AgentRunner {
   review(input: AgentReviewTask): Promise<ReviewReport>;
   repair(input: AgentRepairTask): Promise<AgentRunOutcome>;
+  verifyRepair?(input: VerifyRepairInput): Promise<RepairVerificationReport>;
 }
 
 export class SandcastleCodexRunner implements AgentRunner {
+  constructor(
+    private readonly runner: CommandRunner = new BunCommandRunner()
+  ) {}
+
   async review(input: AgentReviewTask): Promise<ReviewReport> {
     const run =
       input.kind === "pull-request"
@@ -152,20 +229,23 @@ export class SandcastleCodexRunner implements AgentRunner {
       baseBranch: run.baseBranch,
       name: run.name,
       model: input.config.models.review,
-      effort: input.config.reasoning.review,
+      effort: input.kind === "pull-request" ? (input.effort ?? "low") : "low",
+      runtime: input.runtime,
       prompt: run.prompt,
       maxIterations: 1,
+      cleanupBranch: true,
       structuredOutput: {
         tag: "review",
         schema: ReviewOutputSchema,
-        maxRetries: 2,
+        maxRetries: 1,
       },
     });
 
-    return parseReviewReport(
-      result.structuredOutput ?? result.stdout,
-      run.axis
-    );
+    return {
+      ...parseReviewReport(result.structuredOutput ?? result.stdout, run.axis),
+      promptChars: result.promptChars,
+      durationMs: result.durationMs,
+    };
   }
 
   async repair(input: AgentRepairTask): Promise<AgentRunOutcome> {
@@ -179,8 +259,14 @@ export class SandcastleCodexRunner implements AgentRunner {
         name: `repair-${input.prNumber}`,
         model: input.config.models.repair,
         effort: input.config.reasoning.repair,
+        runtime: input.runtime,
         prompt: buildRepairPrompt(input),
-        maxIterations: 3,
+        maxIterations: 1,
+        structuredOutput: {
+          tag: "repair",
+          schema: RepairOutputSchema,
+          maxRetries: 1,
+        },
       });
     }
 
@@ -194,8 +280,14 @@ export class SandcastleCodexRunner implements AgentRunner {
         name: `repair-ci-${input.prNumber}`,
         model: input.config.models.repair,
         effort: input.config.reasoning.repair,
+        runtime: input.runtime,
         prompt: buildCiRepairPrompt(input),
-        maxIterations: 3,
+        maxIterations: 1,
+        structuredOutput: {
+          tag: "repair",
+          schema: RepairOutputSchema,
+          maxRetries: 1,
+        },
       });
     }
 
@@ -209,8 +301,14 @@ export class SandcastleCodexRunner implements AgentRunner {
         name: `repair-merge-state-${input.prNumber}`,
         model: input.config.models.repair,
         effort: input.config.reasoning.repair,
+        runtime: input.runtime,
         prompt: buildMergeStateRepairPrompt(input),
-        maxIterations: 3,
+        maxIterations: 1,
+        structuredOutput: {
+          tag: "repair",
+          schema: RepairOutputSchema,
+          maxRetries: 1,
+        },
       });
     }
 
@@ -223,9 +321,53 @@ export class SandcastleCodexRunner implements AgentRunner {
       name: `repair-issue-${input.issue.number}`,
       model: input.config.models.repair,
       effort: input.config.reasoning.repair,
+      runtime: input.runtime,
       prompt: buildIssueBranchRepairPrompt(input),
-      maxIterations: 3,
+      maxIterations: 1,
+      structuredOutput: {
+        tag: "repair",
+        schema: RepairOutputSchema,
+        maxRetries: 1,
+      },
     });
+  }
+
+  async verifyRepair(
+    input: VerifyRepairInput
+  ): Promise<RepairVerificationReport> {
+    const branch = reviewSandboxBranch(input.prNumber, "spec");
+    const prompt = buildRepairVerificationPrompt(input);
+    const result = await this.runCodex({
+      cwd: input.cwd,
+      config: input.config,
+      runId: input.runId,
+      branch,
+      baseBranch: input.branch,
+      baseRef: input.repairedHeadRefOid,
+      name: `verify-repair-${input.prNumber}`,
+      model: input.config.models.review,
+      effort: input.findings.some((finding) =>
+        isHighRiskPath(finding.path ?? "")
+      )
+        ? "medium"
+        : "low",
+      runtime: input.runtime,
+      prompt,
+      maxIterations: 1,
+      cleanupBranch: true,
+      structuredOutput: {
+        tag: "repair-verification",
+        schema: RepairVerificationOutputSchema,
+        maxRetries: 1,
+      },
+    });
+    return {
+      ...parseRepairVerificationReport(
+        result.structuredOutput ?? result.stdout
+      ),
+      promptChars: result.promptChars,
+      durationMs: result.durationMs,
+    };
   }
 
   private async runCodex(input: {
@@ -234,17 +376,25 @@ export class SandcastleCodexRunner implements AgentRunner {
     readonly runId: string;
     readonly branch: string;
     readonly baseBranch: string;
+    readonly baseRef?: string;
     readonly name: string;
     readonly model: string;
     readonly effort: ReasoningEffort;
+    readonly runtime?: PreparedRuntime;
     readonly prompt: string;
     readonly maxIterations: number;
+    readonly cleanupBranch?: boolean;
     readonly structuredOutput?: {
       readonly tag: string;
       readonly schema: unknown;
       readonly maxRetries: number;
     };
   }): Promise<AgentRunOutcome> {
+    if (input.prompt.length > input.config.validation.promptCharBudget) {
+      throw new AgentPromptBudgetError(
+        `Agent prompt ${input.name} is ${input.prompt.length} characters, exceeding the ${input.config.validation.promptCharBudget} character budget.`
+      );
+    }
     const codexHome = await prepareCodexHome(input.cwd, input.config);
     const logPath = joinPath(
       input.cwd,
@@ -270,6 +420,7 @@ export class SandcastleCodexRunner implements AgentRunner {
         ...mount,
         hostPath: resolvePath(input.cwd, mount.hostPath),
       })),
+      ...(input.runtime?.cacheMount ? [input.runtime.cacheMount] : []),
     ];
     const hostSessionsDir = joinPath(codexHome, "sessions");
     const sandboxSessionsDir = joinPath(SANDBOX_CODEX_HOME, "sessions");
@@ -282,46 +433,88 @@ export class SandcastleCodexRunner implements AgentRunner {
         })
       : undefined;
 
-    const result = await sandcastle.run({
-      cwd: input.cwd,
-      branchStrategy: {
-        type: "branch",
-        branch: input.branch,
-        baseBranch: `${input.config.remote}/${input.baseBranch}`,
-      },
-      sandbox: sandboxes.docker({
-        imageName: input.config.docker.imageName,
-        mounts,
-        cpus: input.config.docker.cpus,
-      }),
-      agent: sandcastle.codex(input.model, {
-        effort: input.effort,
-        captureSessions: input.config.retention.keepSessions,
-        env: {
-          CODEX_HOME: SANDBOX_CODEX_HOME,
+    const startedAt = Date.now();
+    let result;
+    try {
+      result = await sandcastle.run({
+        cwd: input.cwd,
+        branchStrategy: {
+          type: "branch",
+          branch: input.branch,
+          baseBranch:
+            input.baseRef ?? `${input.config.remote}/${input.baseBranch}`,
         },
-        sessionStorage: {
-          hostSessionsDir,
-          sandboxSessionsDir,
+        sandbox: sandboxes.docker({
+          imageName: input.runtime?.imageName ?? input.config.docker.imageName,
+          mounts,
+          cpus: input.config.docker.cpus,
+        }),
+        agent: sandcastle.codex(input.model, {
+          effort: input.effort,
+          captureSessions: input.config.retention.keepSessions,
+          env: {
+            CODEX_HOME: SANDBOX_CODEX_HOME,
+          },
+          sessionStorage: {
+            hostSessionsDir,
+            sandboxSessionsDir,
+          },
+        }),
+        hooks: input.runtime?.bootstrap
+          ? {
+              sandbox: {
+                onSandboxReady: [
+                  {
+                    command: input.runtime.bootstrap.command,
+                    timeoutMs: Math.min(
+                      input.runtime.bootstrap.timeoutMs,
+                      input.config.validation.maxWallTimeMs
+                    ),
+                  },
+                ],
+              },
+            }
+          : undefined,
+        prompt: input.prompt,
+        maxIterations: input.maxIterations,
+        name: input.name,
+        completionSignal: "<promise>COMPLETE</promise>",
+        logging: {
+          type: "file",
+          path: logPath,
         },
-      }),
-      prompt: input.prompt,
-      maxIterations: input.maxIterations,
-      name: input.name,
-      completionSignal: "<promise>COMPLETE</promise>",
-      logging: {
-        type: "file",
-        path: logPath,
-      },
-      timeouts: {
-        gitSetupMs: 60_000,
-        commitCollectionMs: 120_000,
-        mergeToHostMs: 120_000,
-      },
-      output,
-    });
+        idleTimeoutSeconds: Math.ceil(
+          input.config.validation.maxWallTimeMs / 1000
+        ),
+        timeouts: {
+          gitSetupMs: 60_000,
+          commitCollectionMs: 120_000,
+          mergeToHostMs: 120_000,
+        },
+        output,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isPreAgentInfrastructureFailure(message)) {
+        throw new AgentInfrastructureError(message, { cause: error });
+      }
+      throw new AgentExecutionError(message, { cause: error });
+    } finally {
+      if (input.cleanupBranch) {
+        await this.runner.run("git", ["branch", "-D", input.branch], {
+          cwd: input.cwd,
+        });
+      }
+    }
 
     const structuredOutput = "output" in result ? result.output : undefined;
+    const iteration = result.iterations?.at?.(-1);
+    if (
+      input.config.retention.sessionPolicy === "failures" &&
+      iteration?.sessionFilePath
+    ) {
+      await unlink(iteration.sessionFilePath).catch(() => undefined);
+    }
 
     return {
       branch: result.branch ?? input.branch,
@@ -336,9 +529,21 @@ export class SandcastleCodexRunner implements AgentRunner {
       stdout: String(result.stdout ?? ""),
       structuredOutput,
       logFilePath: result.logFilePath ?? logPath,
-      sessionId: result.iterations?.at?.(-1)?.sessionId,
+      sessionId:
+        input.config.retention.sessionPolicy === "all"
+          ? iteration?.sessionId
+          : undefined,
+      promptChars: input.prompt.length,
+      durationMs: Date.now() - startedAt,
+      usage: iteration?.usage,
     };
   }
+}
+
+function isPreAgentInfrastructureFailure(message: string): boolean {
+  return /bootstrap|onSandboxReady|sandbox hook|command not found|exit(?:ed)? (?:with )?(?:code )?127|cannot connect to the docker daemon|no such image|network is unreachable|could not resolve host/i.test(
+    message
+  );
 }
 
 export async function prepareCodexHome(
@@ -387,7 +592,7 @@ export function parseReviewReport(
     parsed = JSON.parse(stripJsonFence(jsonText));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(
+    throw new AgentOutputError(
       `Review agent did not return valid JSON for ${axis}: ${message}`,
       { cause: error }
     );
@@ -437,6 +642,8 @@ function normalizeFinding(value: unknown, axis: ReviewAxis): ReviewFinding {
     severity,
     title: typeof record.title === "string" ? record.title : "Review finding",
     body: typeof record.body === "string" ? record.body : "",
+    rule: typeof record.rule === "string" ? record.rule : undefined,
+    evidence: typeof record.evidence === "string" ? record.evidence : undefined,
     path: typeof record.path === "string" ? record.path : undefined,
     line: typeof record.line === "number" ? record.line : undefined,
     side:
@@ -446,4 +653,52 @@ function normalizeFinding(value: unknown, axis: ReviewAxis): ReviewFinding {
           ? "RIGHT"
           : undefined,
   };
+}
+
+export function parseRepairVerificationReport(
+  output: unknown
+): RepairVerificationReport {
+  const parsed =
+    typeof output === "string"
+      ? parseTaggedJson(output, "repair-verification")
+      : output;
+  const value =
+    typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : {};
+  return {
+    summary: typeof value.summary === "string" ? value.summary : "",
+    resolvedFindingIds: Array.isArray(value.resolvedFindingIds)
+      ? value.resolvedFindingIds.filter(
+          (item): item is string => typeof item === "string"
+        )
+      : [],
+    findings: Array.isArray(value.findings)
+      ? value.findings.map((finding) =>
+          normalizeFinding(
+            finding,
+            typeof finding === "object" &&
+              finding !== null &&
+              (finding as Record<string, unknown>).axis === "standards"
+              ? "standards"
+              : "spec"
+          )
+        )
+      : [],
+  };
+}
+
+function parseTaggedJson(output: string, tag: string): unknown {
+  const jsonText = extractTaggedJson(output, tag) ?? output.trim();
+  try {
+    return JSON.parse(stripJsonFence(jsonText));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AgentOutputError(
+      `Agent did not return valid ${tag} JSON: ${message}`,
+      {
+        cause: error,
+      }
+    );
+  }
 }

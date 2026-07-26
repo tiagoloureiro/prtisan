@@ -4,12 +4,14 @@ export interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  readonly timedOut?: boolean;
 }
 
 export interface CommandOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string | undefined>;
   readonly input?: string;
+  readonly timeoutMs?: number;
 }
 
 export interface CommandRunner {
@@ -45,6 +47,14 @@ export class BunCommandRunner implements CommandRunner {
       stdout: "pipe",
       stderr: "pipe",
     });
+    let timedOut = false;
+    const timeout =
+      options.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            proc.kill();
+          }, options.timeoutMs);
 
     if (options.input !== undefined) {
       const stdin = proc.stdin;
@@ -55,18 +65,26 @@ export class BunCommandRunner implements CommandRunner {
       stdin.end();
     }
 
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+    let stdout: string;
+    let stderr: string;
+    let exitCode: number;
+    try {
+      [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
 
     return {
       command: [command, ...args],
       cwd: options.cwd,
       stdout,
       stderr,
-      exitCode,
+      exitCode: timedOut ? 124 : exitCode,
+      timedOut,
     };
   }
 }

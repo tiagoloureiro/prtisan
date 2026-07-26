@@ -7,6 +7,7 @@ import {
   type OpenPrGraph,
   type OpenPrNode,
 } from "./open-pr-graph.js";
+import type { RuntimeProvider, VerificationRunner } from "./runtime.js";
 import type { AgentTrainConfig, PullRequest } from "./types.js";
 
 export interface TrainRestackInput {
@@ -20,6 +21,8 @@ export interface TrainRestackInput {
 export interface TrainRestackDeps {
   readonly github: GitHubClient;
   readonly git: GitClient;
+  readonly runtime?: RuntimeProvider;
+  readonly verification?: VerificationRunner;
   readonly log?: (message: string) => void;
 }
 
@@ -74,20 +77,56 @@ async function restackDescendants(
     const nextBase = nextBaseBranch(input.config, node.pr, openBlockerBranches);
 
     if (openBlockerBranches.length > 1) {
-      await deps.git.createSyntheticBaseBranch({
+      const synthetic = await deps.git.createSyntheticBaseCommit({
         runId: input.runId,
         label: `base-pr-${node.pr.number}`,
         syntheticBranch: nextBase,
         blockerBranches: openBlockerBranches,
       });
+      await verifyRestackCommit(
+        input,
+        deps,
+        node.pr.number,
+        synthetic.commit,
+        `synthetic-base-${node.pr.number}`
+      );
+      await deps.git.pushVerifiedCommit({
+        branch: nextBase,
+        commit: synthetic.commit,
+        expectedRemoteSha: synthetic.expectedRemoteSha,
+      });
     }
 
-    const nextBaseAnchorSha = await deps.git.rebaseBranchOntoBase({
+    const rebased = await deps.git.createRebasedCommit({
       runId: input.runId,
       label: `restack-pr-${node.pr.number}`,
       branch: node.pr.headRefName,
       baseBranch: nextBase,
       oldBaseAnchorSha: node.pr.baseRefOid || undefined,
+    });
+    await verifyRestackCommit(
+      input,
+      deps,
+      node.pr.number,
+      rebased.commit,
+      `restack-pr-${node.pr.number}`
+    );
+    const current = await deps.github.getPullRequest(
+      input.config.repo,
+      node.pr.number
+    );
+    if (
+      current.headRefOid !== node.pr.headRefOid ||
+      current.baseRefOid !== node.pr.baseRefOid
+    ) {
+      throw new Error(
+        `PR #${node.pr.number} changed during descendant restack; nothing was pushed.`
+      );
+    }
+    await deps.git.pushVerifiedCommit({
+      branch: node.pr.headRefName,
+      commit: rebased.commit,
+      expectedRemoteSha: node.pr.headRefOid,
     });
 
     if (node.pr.baseRefName !== nextBase) {
@@ -97,9 +136,46 @@ async function restackDescendants(
         nextBase
       );
       deps.log?.(
-        `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${nextBase} at ${nextBaseAnchorSha}`
+        `Retargeted PR #${node.pr.number} from ${node.pr.baseRefName} to ${nextBase} at ${rebased.nextBaseAnchorSha}`
       );
     }
+  }
+}
+
+async function verifyRestackCommit(
+  input: TrainRestackInput,
+  deps: TrainRestackDeps,
+  prNumber: number,
+  commit: string,
+  label: string
+): Promise<void> {
+  if (!deps.runtime || !deps.verification) {
+    throw new Error(
+      `PR #${prNumber} restack requires an authoritative runtime and host verification runner.`
+    );
+  }
+  const runtime = await deps.runtime.prepare({
+    cwd: input.cwd,
+    ref: commit,
+    config: input.config,
+  });
+  const result = await deps.verification.verify({
+    cwd: input.cwd,
+    runId: input.runId,
+    label,
+    ref: commit,
+    config: input.config,
+    runtime,
+  });
+  if (result.status !== "passed") {
+    const failed = result.commands.find((command) => command.exitCode !== 0);
+    throw new Error(
+      `PR #${prNumber} restack failed host verification: ${
+        failed
+          ? `${failed.name} exited ${failed.exitCode}: ${failed.output}`
+          : result.status
+      }`
+    );
   }
 }
 

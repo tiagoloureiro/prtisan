@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { CommandRunner } from "./exec.js";
 import type { GitHubClient } from "./github.js";
 import { resolvePath } from "./path.js";
+import type { RuntimeProvider } from "./runtime.js";
 import type { AgentTrainConfig } from "./types.js";
 
 export type RuntimeReadinessStatus = "ok" | "failed";
@@ -18,6 +19,7 @@ export async function checkRuntimeReadiness(input: {
   readonly config: AgentTrainConfig;
   readonly runner: CommandRunner;
   readonly github?: Pick<GitHubClient, "assertReady">;
+  readonly runtime?: RuntimeProvider;
 }): Promise<RuntimeReadinessDiagnostic[]> {
   const diagnostics: RuntimeReadinessDiagnostic[] = [];
 
@@ -92,6 +94,16 @@ export async function checkRuntimeReadiness(input: {
         : `Dedicated CODEX_HOME is missing at ${codexHome}. Create it and seed Codex auth before running agents.`,
   });
 
+  if (
+    input.runtime &&
+    imageDiagnostic.status === "ok" &&
+    diagnostics.every((item) => item.status === "ok")
+  ) {
+    diagnostics.push(
+      await targetRuntimeDiagnostic(input.runtime, input.cwd, input.config)
+    );
+  }
+
   return diagnostics;
 }
 
@@ -100,6 +112,7 @@ export async function assertRuntimeReady(input: {
   readonly config: AgentTrainConfig;
   readonly runner: CommandRunner;
   readonly github?: Pick<GitHubClient, "assertReady">;
+  readonly runtime?: RuntimeProvider;
   readonly log?: (message: string) => void;
 }): Promise<void> {
   let diagnostics = await checkRuntimeReadiness(input);
@@ -329,6 +342,31 @@ async function githubDiagnostic(
   } catch (error) {
     return {
       name: "GitHub CLI",
+      status: "failed",
+      details: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function targetRuntimeDiagnostic(
+  runtime: RuntimeProvider,
+  cwd: string,
+  config: AgentTrainConfig
+): Promise<RuntimeReadinessDiagnostic> {
+  try {
+    const prepared = await runtime.prepare({
+      cwd,
+      ref: config.targetBranch,
+      config,
+    });
+    return {
+      name: "Target runtime",
+      status: "ok",
+      details: `${prepared.imageName} (${prepared.fingerprint.slice(0, 12)}) with ${prepared.verification.length} verification command(s).`,
+    };
+  } catch (error) {
+    return {
+      name: "Target runtime",
       status: "failed",
       details: error instanceof Error ? error.message : String(error),
     };

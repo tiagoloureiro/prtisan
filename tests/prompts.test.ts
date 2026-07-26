@@ -25,8 +25,10 @@ describe("prompts", () => {
 
     expect(prompt).toContain("<review>");
     expect(prompt).toContain("$code-review");
-    expect(prompt).toContain("Issue #9");
-    expect(prompt).toContain("PR diff:");
+    expect(prompt).toContain("#9 Blocker");
+    expect(prompt).not.toContain("Create the base.");
+    expect(prompt).toContain("git diff");
+    expect(prompt).not.toContain("diff --git a/a b/a");
   });
 
   test("issue branch review prompt validates repository state without a PR diff", () => {
@@ -40,7 +42,8 @@ describe("prompts", () => {
 
     expect(prompt).toContain("validating target branch main");
     expect(prompt).toContain("Review only the Spec axis.");
-    expect(prompt).toContain("Issue #9");
+    expect(prompt).toContain("#9 Blocker");
+    expect(prompt).not.toContain("Create the base.");
     expect(prompt).not.toContain("PR diff:");
   });
 

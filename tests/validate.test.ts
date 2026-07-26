@@ -9,6 +9,11 @@ import type {
   GitHubClient,
   PullRequestReviewInput,
 } from "@/github.js";
+import type {
+  PreparedRuntime,
+  RuntimeProvider,
+  VerificationRunner,
+} from "@/runtime.js";
 import type { ReviewFinding } from "@/types.js";
 
 import { issue, pullRequest, testConfig } from "./helpers.js";
@@ -43,8 +48,12 @@ describe("validate command", () => {
     });
 
     const result = await executeValidate(
-      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      { github, git, agent }
+      {
+        cwd: "/repo",
+        config: testConfig(),
+        runId: "validate-test",
+      },
+      validationDeps(github, git, agent)
     );
 
     expect(reviewCalls).toEqual(["standards"]);
@@ -77,7 +86,7 @@ describe("validate command", () => {
         pullNumbers: [12],
         runId: "validate-test",
       },
-      { github, git: gitClient(), agent: fakeAgent() }
+      validationDeps(github, gitClient(), fakeAgent())
     );
 
     expect(result.pullRequests).toHaveLength(1);
@@ -108,8 +117,13 @@ describe("validate command", () => {
     });
 
     const result = await executeValidate(
-      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      { github, git: gitClient(), agent }
+      {
+        cwd: "/repo",
+        config: testConfig(),
+        runId: "validate-test",
+        scope: "issues",
+      },
+      validationDeps(github, gitClient(), agent)
     );
 
     expect(reviewedIssues.toSorted()).toEqual([1, 2]);
@@ -124,7 +138,7 @@ describe("validate command", () => {
     });
   });
 
-  test("validates both the associated open PR and the target branch for an issue", async () => {
+  test("does not duplicate target-branch issue validation for an issue represented by an open PR", async () => {
     const primaryIssue = issue({ number: 10, title: "Spec" });
     const pr = pullRequest({
       number: 20,
@@ -159,19 +173,21 @@ describe("validate command", () => {
     });
 
     const result = await executeValidate(
-      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      { github, git: gitClient(), agent }
+      {
+        cwd: "/repo",
+        config: testConfig(),
+        runId: "validate-test",
+        scope: "all",
+      },
+      validationDeps(github, gitClient(), agent)
     );
 
     expect(prReviewAxes).toEqual(["standards", "spec"]);
-    expect(issueReviews).toEqual([10]);
+    expect(issueReviews).toEqual([]);
     expect(postedPrReview?.pullNumber).toBe(20);
-    expect(comments).toHaveLength(1);
+    expect(comments).toHaveLength(0);
     expect(result.pullRequests[0]).toMatchObject({ issueNumber: 10 });
-    expect(result.issues[0]).toMatchObject({
-      issue: { number: 10 },
-      associatedOpenPullRequests: [{ number: 20 }],
-    });
+    expect(result.issues).toEqual([]);
   });
 
   test("posts repair follow-up validation against the pushed repair head", async () => {
@@ -185,16 +201,13 @@ describe("validate command", () => {
       headRefOid: "repair-sha",
     });
     const gitCalls: string[] = [];
-    let getPullRequestCalls = 0;
+    let pushed = false;
     let postedReview: PullRequestReviewInput | undefined;
 
     const github = {
       listOpenPullRequests: async () => [originalPr],
       listOpenIssues: async () => [],
-      getPullRequest: async () => {
-        getPullRequestCalls += 1;
-        return getPullRequestCalls === 1 ? originalPr : repairedPr;
-      },
+      getPullRequest: async () => (pushed ? repairedPr : originalPr),
       getPullRequestDiff: async () => "diff --git a/a.ts b/a.ts",
       createPullRequestReview: async (input: PullRequestReviewInput) => {
         postedReview = input;
@@ -203,22 +216,26 @@ describe("validate command", () => {
 
     await executeValidate(
       { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      {
+      validationDeps(
         github,
-        git: gitClient(gitCalls),
-        agent: fakeAgent({
+        gitClient(gitCalls, {
+          onPushVerified: () => {
+            pushed = true;
+          },
+        }),
+        fakeAgent({
           pullRequestFindings: [[blockingSpecFinding], []],
           repairPullRequestCommits: ["repair-sha"],
-        }),
-      }
+        })
+      )
     );
 
-    expect(gitCalls).toContain("push:feature");
+    expect(gitCalls).toContain("push-verified:feature:repair-sha:old-head");
     expect(postedReview?.commitId).toBe("repair-sha");
     expect(postedReview?.body).toContain('"headRefOid":"repair-sha"');
   });
 
-  test("does not create a duplicate repair PR when main has blocking gaps but an associated PR is open", async () => {
+  test("skips issue repair when an associated open PR already represents the issue", async () => {
     const primaryIssue = issue({ number: 30, title: "Spec" });
     const pr = pullRequest({
       number: 40,
@@ -253,19 +270,17 @@ describe("validate command", () => {
     });
 
     const result = await executeValidate(
-      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      { github, git: gitClient(), agent }
+      {
+        cwd: "/repo",
+        config: testConfig(),
+        runId: "validate-test",
+        scope: "all",
+      },
+      validationDeps(github, gitClient(), agent)
     );
 
-    expect(result.issues[0]).toMatchObject({
-      status: "validation_failed",
-      blockingFindings: 1,
-      repaired: false,
-      repairPullRequest: undefined,
-      associatedOpenPullRequests: [{ number: 40 }],
-    });
-    expect(comments[0]).toContain("Existing open PR(s)");
-    expect(comments[0]).toContain("#40");
+    expect(result.issues).toEqual([]);
+    expect(comments).toEqual([]);
   });
 
   test("creates a repair PR when main has blocking gaps and no associated PR is open", async () => {
@@ -279,6 +294,8 @@ describe("validate command", () => {
     const comments: string[] = [];
     let createdPrInput: CreateOrUpdatePrInput | undefined;
     let repairedBranch: string | undefined;
+    const preparedRefs: string[] = [];
+    const verifiedRuntimeFingerprints: string[] = [];
 
     const github = {
       listOpenPullRequests: async () => [],
@@ -303,14 +320,41 @@ describe("validate command", () => {
       },
     });
 
+    const deps = validationDeps(github, gitClient(gitCalls), agent);
     const result = await executeValidate(
-      { cwd: "/repo", config: testConfig(), runId: "validate-test" },
-      { github, git: gitClient(gitCalls), agent }
+      {
+        cwd: "/repo",
+        config: testConfig(),
+        runId: "validate-test",
+        scope: "issues",
+      },
+      {
+        ...deps,
+        runtime: {
+          prepare: async (input) => {
+            preparedRefs.push(input.ref);
+            return {
+              ...preparedRuntime,
+              fingerprint: `runtime-${input.ref}`,
+            };
+          },
+        },
+        verification: {
+          verify: async (input) => {
+            verifiedRuntimeFingerprints.push(input.runtime.fingerprint);
+            return { status: "passed", commands: [] };
+          },
+        },
+      }
     );
 
     expect(repairedBranch).toBe("agent-train/repair/issue-7");
-    expect(gitCalls).toContain("prepare:agent-train/repair/issue-7:main");
-    expect(gitCalls).toContain("push:agent-train/repair/issue-7");
+    expect(gitCalls).toContain(
+      "prepare-at:agent-train/repair/issue-7:base-sha"
+    );
+    expect(gitCalls).toContain(
+      "push-verified:agent-train/repair/issue-7:repair-sha:"
+    );
     expect(createdPrInput).toMatchObject({
       repo: "o/r",
       baseBranch: "main",
@@ -322,6 +366,8 @@ describe("validate command", () => {
     });
     expect(comments[0]).toContain("Created or updated repair PR");
     expect(comments[0]).toContain("#99");
+    expect(preparedRefs).toEqual(["base-sha", "repair-sha"]);
+    expect(verifiedRuntimeFingerprints).toEqual(["runtime-repair-sha"]);
   });
 
   test("does not create a repair PR for main gaps when repair is disabled", async () => {
@@ -355,8 +401,9 @@ describe("validate command", () => {
         config: testConfig(),
         repair: false,
         runId: "validate-test",
+        scope: "issues",
       },
-      { github, git: gitClient(), agent }
+      validationDeps(github, gitClient(), agent)
     );
 
     expect(result.issues[0]).toMatchObject({
@@ -368,16 +415,43 @@ describe("validate command", () => {
   });
 });
 
-function gitClient(calls: string[] = []): GitClient {
+function gitClient(
+  calls: string[] = [],
+  options: { readonly onPushVerified?: () => void } = {}
+): GitClient {
   return {
     fetchBranch: async (branch: string) => {
       calls.push(`fetch:${branch}`);
+    },
+    revParseRemoteBranch: async (branch: string) => {
+      calls.push(`rev-parse:${branch}`);
+      return "base-sha";
+    },
+    branchExistsOnRemote: async (branch: string) => {
+      calls.push(`remote-exists:${branch}`);
+      return false;
     },
     prepareBranchFromBase: async (branch: string, baseBranch: string) => {
       calls.push(`prepare:${branch}:${baseBranch}`);
     },
     pushBranch: async (branch: string) => {
       calls.push(`push:${branch}`);
+    },
+    prepareBranchAt: async (branch: string, startPoint: string) => {
+      calls.push(`prepare-at:${branch}:${startPoint}`);
+    },
+    pushVerifiedCommit: async (input: {
+      readonly branch: string;
+      readonly commit: string;
+      readonly expectedRemoteSha: string;
+    }) => {
+      calls.push(
+        `push-verified:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
+      );
+      options.onPushVerified?.();
+    },
+    deleteLocalBranch: async (branch: string) => {
+      calls.push(`delete-local:${branch}`);
     },
   } as unknown as GitClient;
 }
@@ -433,14 +507,76 @@ function fakeAgent(
           branch: input.branch,
           commits: options.repairIssueCommits ?? [],
           stdout: "",
+          structuredOutput: {
+            addressedFindingIds: input.findings
+              .map((finding) => finding.findingId)
+              .filter(Boolean),
+            changedPaths: ["src/a.ts"],
+            summary: "",
+            limitations: [],
+          },
         };
       }
 
+      const addressedFindingIds =
+        input.kind === "pull-request"
+          ? input.findings.map((finding) => finding.findingId).filter(Boolean)
+          : [];
       return {
         branch: input.branch,
         commits: options.repairPullRequestCommits ?? [],
         stdout: "",
+        structuredOutput: {
+          addressedFindingIds,
+          changedPaths: ["src/a.ts"],
+          summary: "",
+          limitations: [],
+        },
       };
+    },
+    verifyRepair: async (input) => ({
+      summary: "",
+      resolvedFindingIds: input.findings
+        .map((finding) => finding.findingId)
+        .filter((id): id is string => Boolean(id)),
+      findings: [],
+    }),
+  };
+}
+
+const preparedRuntime: PreparedRuntime = {
+  imageName: "test-runtime",
+  fingerprint: "test-runtime-fingerprint",
+  profile: {
+    kind: "image",
+    verification: [],
+    probes: [],
+    fingerprint: "test-runtime-profile",
+  },
+  verification: [],
+  probes: [],
+};
+
+function validationDeps(
+  github: GitHubClient,
+  git: GitClient,
+  agent: AgentRunner
+): {
+  readonly github: GitHubClient;
+  readonly git: GitClient;
+  readonly agent: AgentRunner;
+  readonly runtime: RuntimeProvider;
+  readonly verification: VerificationRunner;
+} {
+  return {
+    github,
+    git,
+    agent,
+    runtime: {
+      prepare: async () => preparedRuntime,
+    },
+    verification: {
+      verify: async () => ({ status: "passed", commands: [] }),
     },
   };
 }

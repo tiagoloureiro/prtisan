@@ -24,6 +24,9 @@ const GITIGNORE_RULES = [
   ".sandcastle/worktrees/",
   ".sandcastle/logs/",
   ".sandcastle/patches/",
+  ".sandcastle/cache/",
+  ".sandcastle/locks/",
+  ".sandcastle/runtime/",
 ];
 
 export async function writeScaffoldFiles(

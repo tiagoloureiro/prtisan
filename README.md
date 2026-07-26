@@ -20,7 +20,7 @@ Bare `bun init` is Bun's package initializer, so `agent-train` uses package scri
 - GitHub git repo: writes the files in a temporary worktree, pushes `agent-train/setup`, creates or reuses a setup issue, and opens or updates the matching PR.
 - Non-git repo, or a repo not connected to GitHub through `gh`: writes the files directly into the target directory.
 
-`validate` loads all open PRs in the repo, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking PR findings, and posts a GitHub PR review marker tied to the current PR head SHA. It also loads all open issues, validates the target branch against each issue's spec, posts issue comments with the main-branch result, and creates or updates an `agent-train/repair/issue-N` PR when the target branch has blocking gaps and no associated PR is open.
+`validate` defaults to open PRs only, including drafts. It derives dependencies from PR base/head branch relationships plus linked closing issue dependencies, runs Standards review for every PR, runs Spec review only when a closing issue exists, optionally repairs blocking findings, and posts a versioned GitHub review marker tied to the immutable head/base/runtime/issue snapshot. Use `--scope issues` for an explicit target-branch issue sweep or `--scope all` for both; issues already represented by an open PR are excluded.
 
 `merge` reloads all open PRs from GitHub, processes them in topological order, marks draft PRs ready when it reaches them, validates or revalidates the current PR when needed, attempts CI and merge-state repair, squash-merges only after GitHub is green/mergeable with `--match-head-commit`, restacks descendants, and revalidates affected PRs.
 
@@ -95,6 +95,13 @@ CODEX_HOME="$PWD/.sandcastle/codex-home" codex login
 
 `agent-train validate` and `agent-train merge` build the configured Sandcastle
 Docker image from `.sandcastle/Dockerfile` when it is missing.
+
+Target repositories are also checked for exact runtime declarations such as
+`.tool-versions`, mise files, `.node-version`, `.nvmrc`, `packageManager`,
+`engines`, and lockfiles. Conflicting or non-exact declarations fail closed.
+Repairs run in an ephemeral branch, pass independent host verification, and are
+published with an exact force-with-lease only if the PR snapshot is still
+current.
 
 ## Development
 

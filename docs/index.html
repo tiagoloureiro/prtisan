@@ -483,9 +483,11 @@ agent-train init --cwd /path/to/repo</code></pre>
           <p>
             The default config targets <code>origin</code>, keeps runtime state
             under <code>.sandcastle</code>, and uses bounded concurrency for
-            validation and GitHub API operations. Review and repair models,
-            reasoning effort, Docker image name, CPU budget, extra mounts, and
-            retention policy can be edited in
+            validation and GitHub API operations. Optional runtime, validation,
+            and retention blocks configure exact probes and verification, lower
+            hard budgets, and aggregate retention. Existing configs stay valid,
+            and legacy <code>keepSessions: true</code> maps to failure-only
+            session retention. These settings can be edited in
             <code>.sandcastle/agent-train.config.json</code>.
           </p>
           <p>
@@ -523,13 +525,22 @@ agent-train init --cwd /path/to/repo</code></pre>
             dependencies, runs Standards review for every selected PR, and runs
             Spec review when a closing issue is present. By default it repairs
             blocking PR findings when possible and posts a GitHub PR review with
-            a validation marker tied to the current PR head SHA.
+            a versioned marker tied to immutable head/base, issue, policy, and
+            runtime digests.
           </p>
           <p>
-            It also checks open issues against the target branch, comments with
-            the result, and can create or update an
+            Validation defaults to PRs only. Use
+            <code>--scope issues</code> for a target-branch issue sweep or
+            <code>--scope all</code> for both. Issue sweeps exclude issues
+            represented by an open PR and can create or update an
             <code>agent-train/repair/issue-N</code> PR when the target branch
-            has blocking gaps and no associated open PR.
+            has verified blocking gaps.
+          </p>
+          <p>
+            Exact target runtimes are discovered before agents run. Repairs use
+            one batch, independent host verification, a targeted recheck, and
+            exact force-with-lease publication only while the snapshot remains
+            current.
           </p>
           <pre><code>agent-train validate --no-repair</code></pre>
         </section>

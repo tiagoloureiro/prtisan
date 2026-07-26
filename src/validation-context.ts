@@ -7,6 +7,7 @@ import {
   type OpenPrNode,
 } from "./open-pr-graph.js";
 import type { Issue, PullRequest } from "./types.js";
+import type { ValidationScope } from "./types.js";
 
 export type PullRequestSummary = Pick<
   PullRequest,
@@ -31,6 +32,7 @@ export async function buildValidationPlan(input: {
   readonly targetBranch: string;
   readonly pullNumbers?: readonly number[];
   readonly concurrency?: number;
+  readonly scope?: ValidationScope;
 }): Promise<ValidationPlan> {
   const issueContext = new GitHubIssueContext(input.github, input.repo);
   const graph = await loadOpenPrGraph({
@@ -40,16 +42,19 @@ export async function buildValidationPlan(input: {
     concurrency: input.concurrency,
     issueContext,
   });
-  const pullRequestJobs = selectedNodes(graph, input.pullNumbers);
-  const issueJobs = input.pullNumbers
-    ? []
-    : await issueValidationJobs(
-        input.github,
-        input.repo,
-        graph,
-        issueContext,
-        input.concurrency
-      );
+  const scope = input.pullNumbers ? "prs" : (input.scope ?? "prs");
+  const pullRequestJobs =
+    scope === "issues" ? [] : selectedNodes(graph, input.pullNumbers);
+  const issueJobs =
+    scope === "prs"
+      ? []
+      : await issueValidationJobs(
+          input.github,
+          input.repo,
+          graph,
+          issueContext,
+          input.concurrency
+        );
 
   return {
     graph,
@@ -69,10 +74,13 @@ async function issueValidationJobs(
   issueContext.rememberAll(issues);
   const pullRequestsByIssue = openPullRequestsByIssue(graph);
 
-  return mapLimit(issues, concurrency, async (issue) => ({
+  const withoutOpenPullRequest = issues.filter(
+    (issue) => (pullRequestsByIssue.get(issue.number) ?? []).length === 0
+  );
+  return mapLimit(withoutOpenPullRequest, concurrency, async (issue) => ({
     issue,
     relatedIssues: await issueContext.relatedIssues(issue),
-    associatedOpenPullRequests: pullRequestsByIssue.get(issue.number) ?? [],
+    associatedOpenPullRequests: [],
   }));
 }
 

@@ -6,7 +6,7 @@ import { buildValidationPlan } from "@/validation-context.js";
 import { issue, pullRequest } from "./helpers.js";
 
 describe("validation context", () => {
-  test("uses the primary closing issue for PR jobs and all closing issues for issue associations", async () => {
+  test("uses the primary closing issue and skips duplicate issue jobs represented by an open PR", async () => {
     const primary = issue({ number: 10, title: "Primary" });
     const secondary = issue({ number: 11, title: "Secondary" });
     const pr = pullRequest({
@@ -27,18 +27,11 @@ describe("validation context", () => {
       github,
       repo: "o/r",
       targetBranch: "main",
+      scope: "all",
     });
 
     expect(plan.pullRequestJobs[0]?.issue?.number).toBe(10);
-    expect(
-      plan.issueJobs.map((job) => [
-        job.issue.number,
-        job.associatedOpenPullRequests.map((item) => item.number),
-      ])
-    ).toEqual([
-      [10, [20]],
-      [11, [20]],
-    ]);
+    expect(plan.issueJobs).toEqual([]);
   });
 
   test("limits related issue loading while building issue jobs", async () => {
@@ -69,6 +62,7 @@ describe("validation context", () => {
       repo: "o/r",
       targetBranch: "main",
       concurrency: 2,
+      scope: "issues",
     });
 
     expect(plan.issueJobs).toHaveLength(5);

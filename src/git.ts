@@ -4,6 +4,13 @@ import { ensureDir } from "./fs.js";
 import { dirname, joinPath, normalizePath } from "./path.js";
 import type { AgentTrainConfig } from "./types.js";
 
+const ROOT_STANDARD_FILES = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  "CONTRIBUTING.md",
+  ".github/copilot-instructions.md",
+]);
+
 export class GitClient {
   private repoRootPath?: string;
 
@@ -63,6 +70,40 @@ export class GitClient {
     );
   }
 
+  async pushVerifiedCommit(input: {
+    readonly branch: string;
+    readonly commit: string;
+    readonly expectedRemoteSha: string;
+  }): Promise<void> {
+    await mustRun(
+      this.runner,
+      "git",
+      [
+        "push",
+        this.config.remote,
+        `--force-with-lease=refs/heads/${input.branch}:${input.expectedRemoteSha}`,
+        `${input.commit}:refs/heads/${input.branch}`,
+      ],
+      { cwd: this.cwd }
+    );
+  }
+
+  async prepareBranchAt(branch: string, startPoint: string): Promise<void> {
+    await this.upsertLocalBranch(branch, startPoint);
+  }
+
+  async deleteLocalBranch(branch: string): Promise<void> {
+    const worktreePath = await this.checkedOutWorktreePath(branch);
+    if (worktreePath && (await this.isManagedBranchWorktree(worktreePath))) {
+      await this.runner.run(
+        "git",
+        ["worktree", "remove", "--force", worktreePath],
+        { cwd: this.cwd }
+      );
+    }
+    await this.runner.run("git", ["branch", "-D", branch], { cwd: this.cwd });
+  }
+
   async branchExistsOnRemote(branch: string): Promise<boolean> {
     const result = await this.runner.run(
       "git",
@@ -85,12 +126,64 @@ export class GitClient {
     return result.stdout.trim();
   }
 
+  async readStandardsAtRef(
+    ref: string,
+    changedFiles: readonly string[]
+  ): Promise<string[]> {
+    const listed = await this.runner.run(
+      "git",
+      ["ls-tree", "-r", "--name-only", ref],
+      { cwd: this.cwd }
+    );
+    if (listed.exitCode !== 0) return [];
+
+    const changedDirectories = new Set(
+      changedFiles.flatMap((path) => ancestorDirectories(path))
+    );
+    const paths = listed.stdout
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .filter(
+        (path) =>
+          ROOT_STANDARD_FILES.has(path) ||
+          (path.endsWith("/AGENTS.md") && changedDirectories.has(dirname(path)))
+      )
+      .sort();
+    const contents: string[] = [];
+    for (const path of paths) {
+      const result = await this.runner.run("git", ["show", `${ref}:${path}`], {
+        cwd: this.cwd,
+      });
+      if (result.exitCode === 0) {
+        contents.push(`${path}\n${result.stdout}`);
+      }
+    }
+    return contents;
+  }
+
   async createSyntheticBaseBranch(input: {
     readonly runId: string;
     readonly label: string;
     readonly syntheticBranch: string;
     readonly blockerBranches: readonly string[];
   }): Promise<void> {
+    const prepared = await this.createSyntheticBaseCommit(input);
+    await this.pushVerifiedCommit({
+      branch: input.syntheticBranch,
+      commit: prepared.commit,
+      expectedRemoteSha: prepared.expectedRemoteSha,
+    });
+  }
+
+  async createSyntheticBaseCommit(input: {
+    readonly runId: string;
+    readonly label: string;
+    readonly syntheticBranch: string;
+    readonly blockerBranches: readonly string[];
+  }): Promise<{
+    readonly commit: string;
+    readonly expectedRemoteSha: string;
+  }> {
     const worktreePath = joinPath(
       this.cwd,
       ".sandcastle",
@@ -102,6 +195,12 @@ export class GitClient {
 
     await this.clearManagedWorktree(worktreePath);
     await this.fetchBranch(this.config.targetBranch);
+    const remoteBranchExists = await this.branchExistsOnRemote(
+      input.syntheticBranch
+    );
+    const expectedRemoteSha = remoteBranchExists
+      ? await this.revParseRemoteBranch(input.syntheticBranch)
+      : "";
     for (const branch of input.blockerBranches) {
       await this.fetchBranch(branch);
     }
@@ -121,15 +220,6 @@ export class GitClient {
         { cwd: this.cwd }
       );
 
-      await mustRun(
-        this.runner,
-        "git",
-        ["switch", "-C", input.syntheticBranch],
-        {
-          cwd: worktreePath,
-        }
-      );
-
       for (const branch of input.blockerBranches) {
         await mustRun(
           this.runner,
@@ -140,19 +230,13 @@ export class GitClient {
           }
         );
       }
-
-      await mustRun(
-        this.runner,
-        "git",
-        [
-          "push",
-          "--set-upstream",
-          this.config.remote,
-          input.syntheticBranch,
-          "--force-with-lease",
-        ],
-        { cwd: worktreePath }
-      );
+      const commit = await mustRun(this.runner, "git", ["rev-parse", "HEAD"], {
+        cwd: worktreePath,
+      });
+      return {
+        commit: commit.stdout.trim(),
+        expectedRemoteSha,
+      };
     } finally {
       await this.runner.run(
         "git",
@@ -169,6 +253,26 @@ export class GitClient {
     readonly baseBranch: string;
     readonly oldBaseAnchorSha?: string;
   }): Promise<string> {
+    const prepared = await this.createRebasedCommit(input);
+    await this.pushVerifiedCommit({
+      branch: input.branch,
+      commit: prepared.commit,
+      expectedRemoteSha: prepared.expectedRemoteSha,
+    });
+    return prepared.nextBaseAnchorSha;
+  }
+
+  async createRebasedCommit(input: {
+    readonly runId: string;
+    readonly label: string;
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly oldBaseAnchorSha?: string;
+  }): Promise<{
+    readonly commit: string;
+    readonly nextBaseAnchorSha: string;
+    readonly expectedRemoteSha: string;
+  }> {
     const worktreePath = joinPath(
       this.cwd,
       ".sandcastle",
@@ -181,6 +285,7 @@ export class GitClient {
     await this.clearManagedWorktree(worktreePath);
     await this.fetchBranch(input.branch);
     await this.fetchBranch(input.baseBranch);
+    const expectedRemoteSha = await this.revParseRemoteBranch(input.branch);
 
     try {
       await mustRun(
@@ -190,8 +295,7 @@ export class GitClient {
           "worktree",
           "add",
           "--force",
-          "-B",
-          input.branch,
+          "--detach",
           worktreePath,
           `${this.config.remote}/${input.branch}`,
         ],
@@ -206,15 +310,14 @@ export class GitClient {
         ? ["rebase", "--onto", nextBase, input.oldBaseAnchorSha]
         : ["rebase", nextBase];
       await mustRun(this.runner, "git", rebaseArgs, { cwd: worktreePath });
-      await mustRun(
-        this.runner,
-        "git",
-        ["push", this.config.remote, input.branch, "--force-with-lease"],
-        {
-          cwd: worktreePath,
-        }
-      );
-      return nextBaseAnchorSha;
+      const commit = await mustRun(this.runner, "git", ["rev-parse", "HEAD"], {
+        cwd: worktreePath,
+      });
+      return {
+        commit: commit.stdout.trim(),
+        nextBaseAnchorSha,
+        expectedRemoteSha,
+      };
     } finally {
       await this.runner.run(
         "git",
@@ -232,6 +335,27 @@ export class GitClient {
     readonly diffBaseRef: string;
     readonly commitMessage: string;
   }): Promise<string> {
+    const prepared = await this.createBranchCommitFromBaseDiff(input);
+    await this.pushVerifiedCommit({
+      branch: input.branch,
+      commit: prepared.commit,
+      expectedRemoteSha: prepared.expectedRemoteSha,
+    });
+    return prepared.nextBaseAnchorSha;
+  }
+
+  async createBranchCommitFromBaseDiff(input: {
+    readonly runId: string;
+    readonly label: string;
+    readonly branch: string;
+    readonly baseBranch: string;
+    readonly diffBaseRef: string;
+    readonly commitMessage: string;
+  }): Promise<{
+    readonly commit: string;
+    readonly nextBaseAnchorSha: string;
+    readonly expectedRemoteSha: string;
+  }> {
     const worktreePath = joinPath(
       this.cwd,
       ".sandcastle",
@@ -244,6 +368,7 @@ export class GitClient {
     await this.clearManagedWorktree(worktreePath);
     await this.fetchBranch(input.branch);
     await this.fetchBranch(input.baseBranch);
+    const expectedRemoteSha = await this.revParseRemoteBranch(input.branch);
 
     try {
       await mustRun(
@@ -260,9 +385,6 @@ export class GitClient {
         { cwd: this.cwd }
       );
 
-      await mustRun(this.runner, "git", ["switch", "-C", input.branch], {
-        cwd: worktreePath,
-      });
       const nextBaseAnchorSha = await this.revParseRemoteBranch(
         input.baseBranch
       );
@@ -300,15 +422,14 @@ export class GitClient {
           }
         );
       }
-      await mustRun(
-        this.runner,
-        "git",
-        ["push", this.config.remote, input.branch, "--force-with-lease"],
-        {
-          cwd: worktreePath,
-        }
-      );
-      return nextBaseAnchorSha;
+      const commit = await mustRun(this.runner, "git", ["rev-parse", "HEAD"], {
+        cwd: worktreePath,
+      });
+      return {
+        commit: commit.stdout.trim(),
+        nextBaseAnchorSha,
+        expectedRemoteSha,
+      };
     } finally {
       await this.runner.run(
         "git",
@@ -452,4 +573,16 @@ export class GitClient {
     await this.runner.run("rm", ["-rf", worktreePath], { cwd: this.cwd });
     await ensureDir(dirname(worktreePath));
   }
+}
+
+function ancestorDirectories(path: string): string[] {
+  const directories = [""];
+  let current = dirname(path);
+  while (current && current !== "." && current !== "/") {
+    directories.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return directories;
 }

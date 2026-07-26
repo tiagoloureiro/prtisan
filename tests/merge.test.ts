@@ -4,7 +4,13 @@ import type { AgentRunner } from "@/agent.js";
 import { executeMerge } from "@/commands/merge.js";
 import type { GitClient } from "@/git.js";
 import type { GitHubClient } from "@/github.js";
+import { InMemoryRepairAttemptStore } from "@/repair-attempt-store.js";
 import { VALIDATION_REVIEW_MARKER } from "@/review.js";
+import type {
+  PreparedRuntime,
+  RuntimeProvider,
+  VerificationRunner,
+} from "@/runtime.js";
 import type {
   AgentRunOutcome,
   PullRequest,
@@ -24,6 +30,7 @@ describe("merge command", () => {
       {
         github: githubSequence([[draft], [ready], []], calls),
         git: gitClient(calls),
+        validatePullRequests: validationSequence([ready]),
       }
     );
 
@@ -40,9 +47,7 @@ describe("merge command", () => {
       {
         github: githubSequence([[missing], [validated], []]),
         git: gitClient(),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        validatePullRequests: validationSequence([validated], validatedPulls),
       }
     );
 
@@ -77,9 +82,9 @@ describe("merge command", () => {
           calls
         ),
         git: gitClient(calls),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        runtime: passingRuntime,
+        verification: passingVerification,
+        validatePullRequests: validationSequence([validated], validatedPulls),
       }
     );
 
@@ -92,7 +97,7 @@ describe("merge command", () => {
     const stale = pullRequest({
       number: 12,
       headRefOid: "current-head",
-      latestReviews: [validationReview("old-head")],
+      latestReviews: [validationReview("old-head", "base-sha")],
     });
     const fresh = validatedPullRequest({
       number: 12,
@@ -105,16 +110,14 @@ describe("merge command", () => {
       {
         github: githubSequence([[stale], [fresh], []]),
         git: gitClient(),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        validatePullRequests: validationSequence([fresh], validatedPulls),
       }
     );
 
     expect(validatedPulls).toEqual([[12]]);
   });
 
-  test("accepts validation markers from recent reviews when latestReviews is empty", async () => {
+  test("rechecks complete validation context before trusting a recent marker", async () => {
     const validated = reviewOnlyValidatedPullRequest({ number: 118 });
     const calls: string[] = [];
     const validatedPulls: number[][] = [];
@@ -124,17 +127,15 @@ describe("merge command", () => {
       {
         github: githubSequence([[validated], []], calls),
         git: gitClient(calls),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        validatePullRequests: validationSequence([validated], validatedPulls),
       }
     );
 
-    expect(validatedPulls).toEqual([]);
+    expect(validatedPulls).toEqual([[118]]);
     expect(calls).toContain("merge:118");
   });
 
-  test("stops when validation repair still leaves blocking findings", async () => {
+  test("treats an already-blocked validation as a human stop", async () => {
     const blocked = validatedPullRequest({
       number: 33,
       validation: { blockingFindings: 2 },
@@ -145,15 +146,13 @@ describe("merge command", () => {
       executeMerge(
         { cwd: "/repo", config: testConfig(), runId: "merge-test" },
         {
-          github: githubSequence([[blocked], [blocked]]),
+          github: githubSequence([[blocked]]),
           git: gitClient(),
-          validatePullRequests: async (pullNumbers) => {
-            validatedPulls.push([...pullNumbers]);
-          },
+          validatePullRequests: validationSequence([blocked], validatedPulls),
         }
       )
-    ).rejects.toThrow("Validation repair reached 6 attempt(s)");
-    expect(validatedPulls).toEqual([[33], [33], [33], [33], [33], [33]]);
+    ).rejects.toThrow("PR #33 has 2 blocking agent validation finding(s).");
+    expect(validatedPulls).toEqual([]);
   });
 
   test("repairs failing GitHub Actions checks, waits, revalidates, and merges", async () => {
@@ -174,6 +173,7 @@ describe("merge command", () => {
       { cwd: "/repo", config: testConfig(), runId: "merge-test" },
       {
         github: githubSequence([[failing], [repaired], []], calls, {
+          getPullRequests: [failing, repaired],
           checkEvidence: [
             {
               name: "check",
@@ -193,9 +193,12 @@ describe("merge command", () => {
             return outcome({ branch: input.branch, commits: ["head-2"] });
           },
         }),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        runtime: passingRuntime,
+        verification: passingVerification,
+        validatePullRequests: validationSequence(
+          [failing, repaired],
+          validatedPulls
+        ),
       }
     );
 
@@ -203,18 +206,70 @@ describe("merge command", () => {
       name: "check",
       logExcerpt: "test failed",
     });
-    expect(calls).toContain("push:branch-44");
+    expect(calls).toContain("push-verified:branch-44:head-2:head-1");
     expect(calls).toContain("wait-checks:44");
-    expect(validatedPulls).toEqual([[44]]);
+    expect(validatedPulls).toEqual([[44], [44]]);
     expect(calls).toContain("merge:44");
   });
 
-  test("posts a PR comment when CI repair cannot make checks green", async () => {
+  test("persists CI repair fingerprints across merge invocations", async () => {
+    const failing = validatedPullRequest({
+      number: 49,
+      headRefOid: "head-1",
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const attempts = new InMemoryRepairAttemptStore();
+    const repairCalls: string[] = [];
+    const evidence: PullRequestCheckEvidence[] = [
+      {
+        name: "check",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        detailsUrl: "https://github.com/o/r/actions/runs/101",
+        runId: "101",
+        logExcerpt: "test failed",
+      },
+    ];
+    const deps = () => ({
+      github: githubSequence([[failing]], [], {
+        checkEvidence: evidence,
+      }),
+      git: gitClient(),
+      agent: agentRunner({
+        repairCiFailure: async (input) => {
+          repairCalls.push(input.branch);
+          return outcome({ branch: input.branch, commits: [] });
+        },
+      }),
+      runtime: passingRuntime,
+      verification: passingVerification,
+      repairAttempts: attempts,
+      validatePullRequests: validationSequence([failing]),
+    });
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-one" },
+        deps()
+      )
+    ).rejects.toThrow("CI repair produced no commits");
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-two" },
+        deps()
+      )
+    ).rejects.toThrow("already consumed its single repair attempt");
+
+    expect(repairCalls).toHaveLength(1);
+  });
+
+  test("does not launch CI repair when failure evidence has no logs", async () => {
     const failing = validatedPullRequest({
       number: 45,
       statusCheckRollup: [failedActionsCheck()],
     });
     const comments: string[] = [];
+    const repairCalls: string[] = [];
 
     await expect(
       executeMerge(
@@ -232,14 +287,18 @@ describe("merge command", () => {
             ],
           }),
           git: gitClient(),
+          validatePullRequests: validationSequence([failing]),
           agent: agentRunner({
-            repairCiFailure: async (input) =>
-              outcome({ branch: input.branch, commits: [] }),
+            repairCiFailure: async (input) => {
+              repairCalls.push(input.branch);
+              return outcome({ branch: input.branch, commits: [] });
+            },
           }),
         }
       )
-    ).rejects.toThrow("CI repair produced no commits");
+    ).rejects.toThrow("none is an actionable completed code failure with logs");
 
+    expect(repairCalls).toEqual([]);
     expect(comments[0]).toContain("Agent train could not make CI green");
     expect(comments[0]).toContain("check: FAILURE");
   });
@@ -257,6 +316,7 @@ describe("merge command", () => {
         {
           github: githubSequence([[reviewRequired]]),
           git: gitClient(),
+          validatePullRequests: validationSequence([reviewRequired]),
           agent: agentRunner({
             repairCiFailure: async (input) => {
               repairCalls.push("ci");
@@ -290,6 +350,7 @@ describe("merge command", () => {
       { cwd: "/repo", config: testConfig(), runId: "merge-test" },
       {
         github: githubSequence([[dirty], [mergeable], []], [], {
+          getPullRequests: [dirty, mergeable],
           waitForChecks: mergeable,
         }),
         git: gitClient(),
@@ -299,14 +360,93 @@ describe("merge command", () => {
             return outcome({ branch: input.branch, commits: ["head-2"] });
           },
         }),
-        validatePullRequests: async (pullNumbers) => {
-          validatedPulls.push([...pullNumbers]);
-        },
+        runtime: passingRuntime,
+        verification: passingVerification,
+        validatePullRequests: validationSequence(
+          [dirty, mergeable],
+          validatedPulls
+        ),
       }
     );
 
     expect(mergeStates).toEqual(["DIRTY"]);
-    expect(validatedPulls).toEqual([[66]]);
+    expect(validatedPulls).toEqual([[66], [66]]);
+  });
+
+  test("rebases BEHIND deterministically, verifies, and publishes by exact lease", async () => {
+    const behind = validatedPullRequest({
+      number: 67,
+      headRefOid: "head-1",
+      mergeStateStatus: "BEHIND",
+    });
+    const rebased = validatedPullRequest({
+      number: 67,
+      headRefOid: "rebased-head",
+    });
+    const calls: string[] = [];
+    const verifiedRefs: string[] = [];
+
+    await executeMerge(
+      { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+      {
+        github: githubSequence([[behind], [rebased], []], calls, {
+          getPullRequests: [behind, rebased],
+          waitForChecks: rebased,
+        }),
+        git: gitClient(calls),
+        runtime: passingRuntime,
+        verification: {
+          verify: async (input) => {
+            verifiedRefs.push(input.ref);
+            return { status: "passed", commands: [] };
+          },
+        },
+        validatePullRequests: validationSequence([behind, rebased]),
+      }
+    );
+
+    expect(verifiedRefs).toEqual(["rebased-head"]);
+    expect(calls).toContain("rebase:branch-67:main:base-sha");
+    expect(calls).toContain("push-verified:branch-67:rebased-head:head-1");
+    expect(calls).toContain("merge:67");
+  });
+
+  test("does not publish a deterministic rebase when verification fails", async () => {
+    const behind = validatedPullRequest({
+      number: 68,
+      headRefOid: "head-1",
+      mergeStateStatus: "BEHIND",
+    });
+    const calls: string[] = [];
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+        {
+          github: githubSequence([[behind]], calls),
+          git: gitClient(calls),
+          runtime: passingRuntime,
+          validatePullRequests: validationSequence([behind]),
+          verification: {
+            verify: async () => ({
+              status: "failed",
+              commands: [
+                {
+                  name: "Project check",
+                  command: "pnpm check",
+                  exitCode: 1,
+                  durationMs: 1,
+                  timedOut: false,
+                  output: "failed",
+                },
+              ],
+            }),
+          },
+        }
+      )
+    ).rejects.toThrow("deterministic branch update failed host verification");
+
+    expect(calls.some((call) => call.startsWith("push-verified:"))).toBe(false);
   });
 
   test("allows a fresh CI repair after merge-state repair changes the PR head", async () => {
@@ -341,16 +481,35 @@ describe("merge command", () => {
           calls,
           {
             comments,
-            getPullRequests: [dirtyHead2, ciFailHead3, greenHead4],
-            checkEvidence: [
-              {
-                name: "check",
-                status: "COMPLETED",
-                conclusion: "FAILURE",
-                detailsUrl: "https://github.com/o/r/actions/runs/101",
-                runId: "101",
-                logExcerpt: "test failed",
-              },
+            getPullRequests: [
+              ciFailHead1,
+              dirtyHead2,
+              dirtyHead2,
+              ciFailHead3,
+              ciFailHead3,
+              greenHead4,
+            ],
+            checkEvidenceSequence: [
+              [
+                {
+                  name: "check",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: "https://github.com/o/r/actions/runs/101",
+                  runId: "101",
+                  logExcerpt: "test failed",
+                },
+              ],
+              [
+                {
+                  name: "lint",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: "https://github.com/o/r/actions/runs/102",
+                  runId: "102",
+                  logExcerpt: "lint failed",
+                },
+              ],
             ],
             waitForChecks: [dirtyHead2, ciFailHead3, greenHead4],
           }
@@ -369,7 +528,14 @@ describe("merge command", () => {
             return outcome({ branch: input.branch, commits: ["head-3"] });
           },
         }),
-        validatePullRequests: async () => {},
+        runtime: passingRuntime,
+        verification: passingVerification,
+        validatePullRequests: validationSequence([
+          ciFailHead1,
+          dirtyHead2,
+          ciFailHead3,
+          greenHead4,
+        ]),
       }
     );
 
@@ -378,28 +544,38 @@ describe("merge command", () => {
     expect(calls).toContain("merge:46");
   });
 
-  test("stops merge-state repair when the agent produces no commits", async () => {
+  test("refreshes UNKNOWN once without launching a repair agent", async () => {
     const unknown = validatedPullRequest({
       number: 77,
       mergeStateStatus: "UNKNOWN",
     });
 
+    const repairCalls: string[] = [];
+    const delays: number[] = [];
     await expect(
       executeMerge(
         { cwd: "/repo", config: testConfig(), runId: "merge-test" },
         {
           github: githubSequence([[unknown]]),
           git: gitClient(),
+          validatePullRequests: validationSequence([unknown]),
+          sleep: async (milliseconds) => {
+            delays.push(milliseconds);
+          },
           agent: agentRunner({
-            repairMergeState: async (input) =>
-              outcome({ branch: input.branch, commits: [] }),
+            repairMergeState: async (input) => {
+              repairCalls.push(input.branch);
+              return outcome({ branch: input.branch, commits: [] });
+            },
           }),
         }
       )
-    ).rejects.toThrow("merge-state repair produced no commits");
+    ).rejects.toThrow("remained UNKNOWN after bounded refresh");
+    expect(repairCalls).toEqual([]);
+    expect(delays).toEqual([2_000, 5_000, 10_000]);
   });
 
-  test("caps merge-state repair at three attempts", async () => {
+  test("derives BLOCKED as a concrete hard stop without agent repair", async () => {
     const blocked = validatedPullRequest({
       number: 88,
       mergeStateStatus: "BLOCKED",
@@ -410,7 +586,7 @@ describe("merge command", () => {
       executeMerge(
         { cwd: "/repo", config: testConfig(), runId: "merge-test" },
         {
-          github: githubSequence([[blocked], [blocked], [blocked], [blocked]]),
+          github: githubSequence([[blocked]]),
           git: gitClient(),
           agent: agentRunner({
             repairMergeState: async (input) => {
@@ -418,17 +594,18 @@ describe("merge command", () => {
               return outcome({ branch: input.branch, commits: ["head-88"] });
             },
           }),
-          validatePullRequests: async () => {},
+          validatePullRequests: validationSequence([blocked]),
         }
       )
-    ).rejects.toThrow("after 3 merge-state repair attempt(s)");
+    ).rejects.toThrow("PR #88 is not mergeable yet (BLOCKED).");
 
-    expect(repairAttempts).toHaveLength(3);
+    expect(repairAttempts).toHaveLength(0);
   });
 });
 
 function validationReview(
   headRefOid: string,
+  baseRefOid: string,
   input: {
     readonly blockingFindings?: number;
     readonly advisoryFindings?: number;
@@ -439,9 +616,16 @@ function validationReview(
     state: input.blockingFindings ? "CHANGES_REQUESTED" : "COMMENTED",
     body: `<!-- ${VALIDATION_REVIEW_MARKER} ${JSON.stringify({
       headRefOid,
+      baseRefOid,
       blockingFindings: input.blockingFindings ?? 0,
       advisoryFindings: input.advisoryFindings ?? 0,
       specSkipped: input.specSkipped ?? true,
+      schemaVersion: 2,
+      snapshotKey: `snapshot-${headRefOid}`,
+      policyDigest: "policy",
+      issueContextDigest: "issues",
+      runtimeFingerprint: "runtime",
+      outcome: input.blockingFindings ? "blocked" : "passed",
     })} -->`,
   };
 }
@@ -458,7 +642,7 @@ function reviewOnlyValidatedPullRequest(
   return {
     ...pr,
     reviews: [
-      validationReview(pr.headRefOid, {
+      validationReview(pr.headRefOid, pr.baseRefOid, {
         blockingFindings: input.validation?.blockingFindings,
         advisoryFindings: input.validation?.advisoryFindings,
       }),
@@ -478,7 +662,7 @@ function validatedPullRequest(
   return {
     ...pr,
     latestReviews: [
-      validationReview(pr.headRefOid, {
+      validationReview(pr.headRefOid, pr.baseRefOid, {
         blockingFindings: input.validation?.blockingFindings,
         advisoryFindings: input.validation?.advisoryFindings,
       }),
@@ -497,11 +681,41 @@ function failedActionsCheck(): unknown {
   };
 }
 
+function validationSequence(
+  pulls: readonly PullRequest[],
+  calls?: number[][]
+): (pullNumbers: readonly number[]) => Promise<{
+  readonly pullRequests: readonly {
+    readonly pr: { readonly number: number; readonly headRefOid: string };
+    readonly status: "validated";
+    readonly outcome: { readonly kind: "passed" };
+  }[];
+}> {
+  let index = 0;
+  return async (pullNumbers) => {
+    calls?.push([...pullNumbers]);
+    const pull = pulls[Math.min(index, pulls.length - 1)];
+    index += 1;
+    if (!pull) throw new Error("Missing validation result fixture.");
+    return {
+      pullRequests: pullNumbers.map((number) => ({
+        pr: {
+          number,
+          headRefOid: pull.headRefOid,
+        },
+        status: "validated",
+        outcome: { kind: "passed" },
+      })),
+    };
+  };
+}
+
 function githubSequence(
   pulls: readonly (readonly PullRequest[])[],
   calls: string[] = [],
   options: {
     readonly checkEvidence?: readonly PullRequestCheckEvidence[];
+    readonly checkEvidenceSequence?: readonly (readonly PullRequestCheckEvidence[])[];
     readonly comments?: string[];
     readonly getPullRequests?: readonly PullRequest[];
     readonly waitForChecks?: PullRequest | readonly PullRequest[];
@@ -510,15 +724,20 @@ function githubSequence(
   let listCalls = 0;
   let getCalls = 0;
   let waitCalls = 0;
+  let evidenceCalls = 0;
   const lastNonEmptyPull =
     [...pulls].reverse().find((items) => items.length > 0)?.[0] ??
     pullRequest({});
+  let currentPull =
+    pulls.find((items) => items.length > 0)?.[0] ?? lastNonEmptyPull;
   return {
     listOpenPullRequests: async () => {
       calls.push("list");
       const index = Math.min(listCalls, pulls.length - 1);
       listCalls += 1;
-      return [...(pulls[index] ?? [])];
+      const result = [...(pulls[index] ?? [])];
+      if (result[0]) currentPull = result[0];
+      return result;
     },
     getPullRequest: async (_repo: string, pullNumber: number) => {
       calls.push(`get:${pullNumber}`);
@@ -527,7 +746,7 @@ function githubSequence(
         getCalls += 1;
         return options.getPullRequests[index] ?? lastNonEmptyPull;
       }
-      return lastNonEmptyPull;
+      return currentPull;
     },
     markPullRequestReady: async (_repo: string, pullNumber: number) => {
       calls.push(`ready:${pullNumber}`);
@@ -539,15 +758,32 @@ function githubSequence(
     ) => {
       calls.push(`edit-base:${pullNumber}:${baseBranch}`);
     },
-    getPullRequestCheckEvidence: async () => [...(options.checkEvidence ?? [])],
+    getPullRequestCheckEvidence: async () => {
+      if (options.checkEvidenceSequence) {
+        const index = Math.min(
+          evidenceCalls,
+          options.checkEvidenceSequence.length - 1
+        );
+        evidenceCalls += 1;
+        return [...(options.checkEvidenceSequence[index] ?? [])];
+      }
+      return [...(options.checkEvidence ?? [])];
+    },
     waitForPullRequestChecks: async (_repo: string, pullNumber: number) => {
       calls.push(`wait-checks:${pullNumber}`);
       if (Array.isArray(options.waitForChecks)) {
         const index = Math.min(waitCalls, options.waitForChecks.length - 1);
         waitCalls += 1;
-        return options.waitForChecks[index] ?? pullRequest({});
+        const result = options.waitForChecks[index] ?? pullRequest({});
+        currentPull = result;
+        return result;
       }
-      return options.waitForChecks ?? pulls.at(-1)?.[0] ?? pullRequest({});
+      const result =
+        (options.waitForChecks as PullRequest | undefined) ??
+        pulls.at(-1)?.[0] ??
+        pullRequest({});
+      currentPull = result;
+      return result;
     },
     createPullRequestComment: async (
       _repo: string,
@@ -572,6 +808,21 @@ function githubSequence(
 
 function gitClient(calls: string[] = []): GitClient {
   return {
+    prepareBranchAt: async (branch: string, startPoint: string) => {
+      calls.push(`prepare-at:${branch}:${startPoint}`);
+    },
+    pushVerifiedCommit: async (input: {
+      readonly branch: string;
+      readonly commit: string;
+      readonly expectedRemoteSha: string;
+    }) => {
+      calls.push(
+        `push-verified:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
+      );
+    },
+    deleteLocalBranch: async (branch: string) => {
+      calls.push(`delete-local:${branch}`);
+    },
     pushBranch: async (branch: string) => {
       calls.push(`push:${branch}`);
     },
@@ -597,6 +848,34 @@ function gitClient(calls: string[] = []): GitClient {
         `recreate:${input.branch}:${input.baseBranch}:${input.diffBaseRef}`
       );
       return "next-base-sha";
+    },
+    createBranchCommitFromBaseDiff: async (input: {
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly diffBaseRef: string;
+    }) => {
+      calls.push(
+        `recreate:${input.branch}:${input.baseBranch}:${input.diffBaseRef}`
+      );
+      return {
+        commit: "rebased-head",
+        nextBaseAnchorSha: "next-base-sha",
+        expectedRemoteSha: "old-head",
+      };
+    },
+    createRebasedCommit: async (input: {
+      readonly branch: string;
+      readonly baseBranch: string;
+      readonly oldBaseAnchorSha?: string;
+    }) => {
+      calls.push(
+        `rebase:${input.branch}:${input.baseBranch}:${input.oldBaseAnchorSha ?? ""}`
+      );
+      return {
+        commit: "rebased-head",
+        nextBaseAnchorSha: "next-base-sha",
+        expectedRemoteSha: "old-head",
+      };
     },
   } as unknown as GitClient;
 }
@@ -643,5 +922,32 @@ function outcome(input: {
     branch: input.branch,
     commits: input.commits,
     stdout: "",
+    structuredOutput: {
+      changedPaths: ["src/a.ts"],
+      addressedFindingIds: [],
+      summary: "",
+      limitations: [],
+    },
   };
 }
+
+const preparedRuntime: PreparedRuntime = {
+  imageName: "test-runtime",
+  fingerprint: "test-runtime-fingerprint",
+  profile: {
+    kind: "image",
+    verification: [],
+    probes: [],
+    fingerprint: "test-runtime-profile",
+  },
+  verification: [],
+  probes: [],
+};
+
+const passingRuntime: RuntimeProvider = {
+  prepare: async () => preparedRuntime,
+};
+
+const passingVerification: VerificationRunner = {
+  verify: async () => ({ status: "passed", commands: [] }),
+};

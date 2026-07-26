@@ -19,6 +19,18 @@ describe("CLI parsing", () => {
     });
   });
 
+  test("supports explicit validation scope and rejects unknown scopes", () => {
+    expect(
+      parseCliArgs(["validate", "--repo", "o/r", "--scope", "issues"])
+    ).toMatchObject({
+      command: "validate",
+      options: { scope: "issues" },
+    });
+    expect(() => parseCliArgs(["validate", "--scope", "everything"])).toThrow(
+      "--scope must be one of prs, issues, or all"
+    );
+  });
+
   test("accepts the TUI command with shared repo options", () => {
     expect(
       parseCliArgs([

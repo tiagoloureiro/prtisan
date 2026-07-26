@@ -12,8 +12,17 @@ import {
   checkRuntimeReadiness,
   type RuntimeReadinessDiagnostic,
 } from "@/preflight.js";
+import { FileRepairAttemptStore } from "@/repair-attempt-store.js";
 import { pruneRuntimeArtifacts } from "@/retention.js";
-import type { AgentTrainConfig } from "@/types.js";
+import { FileReviewCache } from "@/review-cache.js";
+import {
+  DockerRuntimeProvider,
+  DockerVerificationRunner,
+  type RuntimeProvider,
+  type VerificationRunner,
+} from "@/runtime.js";
+import type { AgentTrainConfig, ValidationScope } from "@/types.js";
+import { ValidationLeaseManager } from "@/validation-lease.js";
 
 export type TuiRuntimeAction = "refresh" | "preflight" | "validate" | "merge";
 
@@ -24,6 +33,7 @@ export interface TuiRuntimeOptions {
   readonly targetBranch?: string;
   readonly repair?: boolean;
   readonly validateAffected?: boolean;
+  readonly scope?: ValidationScope;
 }
 
 export interface TuiContext {
@@ -76,6 +86,8 @@ export interface TuiRuntimeDeps {
   readonly pruneArtifacts?: typeof pruneRuntimeArtifacts;
   readonly validateCommand?: typeof executeValidate;
   readonly mergeCommand?: typeof executeMerge;
+  readonly runtime?: RuntimeProvider;
+  readonly verification?: VerificationRunner;
 }
 
 export class TuiPreflightError extends Error {
@@ -97,7 +109,10 @@ export function createAgentTrainRuntime(
   const listeners = new Set<(event: TuiProgressEvent) => void>();
   const runner = deps.runner ?? new BunCommandRunner();
   const github = deps.github ?? new GitHubClient(runner, options.cwd);
-  const agent = deps.agent ?? new SandcastleCodexRunner();
+  const agent = deps.agent ?? new SandcastleCodexRunner(runner);
+  const runtime = deps.runtime ?? new DockerRuntimeProvider(runner);
+  const verification =
+    deps.verification ?? new DockerVerificationRunner(runner);
   let contextPromise: Promise<TuiContext> | undefined;
 
   const emit = (event: TuiProgressEvent): void => {
@@ -134,6 +149,7 @@ export function createAgentTrainRuntime(
       config: context.config,
       runner,
       github,
+      runtime,
     });
     emit({ type: "preflight", diagnostics });
     return diagnostics;
@@ -227,16 +243,29 @@ export function createAgentTrainRuntime(
         await assertReady();
         await prune("validate");
         const context = await getContext();
+        const cache = new FileReviewCache(
+          context.cwd,
+          context.config.validation.cacheTtlDays
+        );
+        const lease = new ValidationLeaseManager(
+          context.cwd,
+          context.config.validation.leaseTtlMs
+        );
         const result = await (deps.validateCommand ?? executeValidate)(
           {
             cwd: context.cwd,
             config: context.config,
             repair: options.repair ?? true,
+            scope: options.scope,
           },
           {
             github,
             git: await getGit(),
             agent,
+            runtime,
+            verification,
+            cache,
+            lease,
             log: logFor("validate"),
           }
         );
@@ -265,10 +294,17 @@ export function createAgentTrainRuntime(
         await prune("merge");
         const context = await getContext();
         const git = await getGit();
-        const validatePullRequests = async (
-          pullNumbers: readonly number[]
-        ): Promise<void> => {
-          await (deps.validateCommand ?? executeValidate)(
+        const cache = new FileReviewCache(
+          context.cwd,
+          context.config.validation.cacheTtlDays
+        );
+        const lease = new ValidationLeaseManager(
+          context.cwd,
+          context.config.validation.leaseTtlMs
+        );
+        const repairAttempts = new FileRepairAttemptStore(context.cwd);
+        const validatePullRequests = async (pullNumbers: readonly number[]) => {
+          return (deps.validateCommand ?? executeValidate)(
             {
               cwd: context.cwd,
               config: context.config,
@@ -279,6 +315,10 @@ export function createAgentTrainRuntime(
               github,
               git,
               agent,
+              runtime,
+              verification,
+              cache,
+              lease,
               log: logFor("merge"),
             }
           );
@@ -293,6 +333,9 @@ export function createAgentTrainRuntime(
             github,
             git,
             agent,
+            runtime,
+            verification,
+            repairAttempts,
             validatePullRequests,
             log: logFor("merge"),
           }

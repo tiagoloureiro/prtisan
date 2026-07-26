@@ -4,8 +4,25 @@ import { GitHubIssueContext } from "./issue-context.js";
 import { VALIDATION_REVIEW_MARKER } from "./review.js";
 import type { Issue, PullRequest } from "./types.js";
 
+const VALIDATION_OUTCOMES = new Set([
+  "passed",
+  "repaired",
+  "blocked",
+  "stale",
+  "infra_failed",
+  "budget_exhausted",
+  "needs_human",
+]);
+
 export type PrValidationState =
-  "missing" | "stale" | "passed" | "commented" | "blocked";
+  | "missing"
+  | "stale"
+  | "passed"
+  | "commented"
+  | "blocked"
+  | "infra_failed"
+  | "budget_exhausted"
+  | "needs_human";
 
 export interface PrValidationStatus {
   readonly state: PrValidationState;
@@ -15,6 +32,13 @@ export interface PrValidationStatus {
   readonly reviewEvent?: "COMMENT" | "REQUEST_CHANGES";
   readonly specSkipped?: boolean;
   readonly headRefOid?: string;
+  readonly baseRefOid?: string;
+  readonly snapshotKey?: string;
+  readonly policyDigest?: string;
+  readonly issueContextDigest?: string;
+  readonly runtimeFingerprint?: string;
+  readonly outcome?: string;
+  readonly schemaVersion?: number;
 }
 
 export interface OpenPrNode {
@@ -187,7 +211,10 @@ export function primaryClosingIssueNumber(
 }
 
 export function validationStatusFromPr(
-  pr: Pick<PullRequest, "latestReviews" | "reviews" | "headRefOid">
+  pr: Pick<
+    PullRequest,
+    "latestReviews" | "reviews" | "headRefOid" | "baseRefOid"
+  >
 ): PrValidationStatus {
   const review = [...pr.latestReviews, ...pr.reviews]
     .reverse()
@@ -200,7 +227,7 @@ export function validationStatusFromPr(
     };
   }
 
-  const meta = parseValidationMarker(review.body);
+  const meta = validationMetadataFromBody(review.body);
   const blockingFindings = meta.blockingFindings ?? 0;
   const advisoryFindings = meta.advisoryFindings ?? 0;
   const reviewEvent =
@@ -208,7 +235,12 @@ export function validationStatusFromPr(
       ? "REQUEST_CHANGES"
       : "COMMENT";
 
-  if (meta.headRefOid !== pr.headRefOid) {
+  if (
+    meta.schemaVersion !== 2 ||
+    meta.headRefOid !== pr.headRefOid ||
+    meta.baseRefOid !== pr.baseRefOid ||
+    !completeValidationMetadata(meta)
+  ) {
     return {
       state: "stale",
       checkedAt: review.submittedAt,
@@ -217,11 +249,43 @@ export function validationStatusFromPr(
       reviewEvent,
       specSkipped: meta.specSkipped,
       headRefOid: meta.headRefOid,
+      baseRefOid: meta.baseRefOid,
+      snapshotKey: meta.snapshotKey,
+      policyDigest: meta.policyDigest,
+      issueContextDigest: meta.issueContextDigest,
+      runtimeFingerprint: meta.runtimeFingerprint,
+      outcome: meta.outcome,
+      schemaVersion: meta.schemaVersion,
+    };
+  }
+
+  if (
+    meta.outcome === "infra_failed" ||
+    meta.outcome === "budget_exhausted" ||
+    meta.outcome === "needs_human"
+  ) {
+    return {
+      state: meta.outcome,
+      checkedAt: review.submittedAt,
+      blockingFindings,
+      advisoryFindings,
+      reviewEvent,
+      specSkipped: meta.specSkipped,
+      headRefOid: meta.headRefOid,
+      baseRefOid: meta.baseRefOid,
+      snapshotKey: meta.snapshotKey,
+      policyDigest: meta.policyDigest,
+      issueContextDigest: meta.issueContextDigest,
+      runtimeFingerprint: meta.runtimeFingerprint,
+      outcome: meta.outcome,
+      schemaVersion: meta.schemaVersion,
     };
   }
 
   const blocked =
-    blockingFindings > 0 || review.state.toUpperCase() === "CHANGES_REQUESTED";
+    meta.outcome === "blocked" ||
+    blockingFindings > 0 ||
+    review.state.toUpperCase() === "CHANGES_REQUESTED";
 
   return {
     state: blocked ? "blocked" : advisoryFindings > 0 ? "commented" : "passed",
@@ -231,10 +295,32 @@ export function validationStatusFromPr(
     reviewEvent,
     specSkipped: meta.specSkipped,
     headRefOid: meta.headRefOid,
+    baseRefOid: meta.baseRefOid,
+    snapshotKey: meta.snapshotKey,
+    policyDigest: meta.policyDigest,
+    issueContextDigest: meta.issueContextDigest,
+    runtimeFingerprint: meta.runtimeFingerprint,
+    outcome: meta.outcome,
+    schemaVersion: meta.schemaVersion,
   };
 }
 
-function parseValidationMarker(body: string): Partial<PrValidationStatus> {
+function completeValidationMetadata(
+  metadata: Partial<PrValidationStatus>
+): boolean {
+  return Boolean(
+    metadata.snapshotKey &&
+    metadata.policyDigest &&
+    metadata.issueContextDigest &&
+    metadata.runtimeFingerprint &&
+    metadata.outcome &&
+    VALIDATION_OUTCOMES.has(metadata.outcome)
+  );
+}
+
+export function validationMetadataFromBody(
+  body: string
+): Partial<PrValidationStatus> {
   const match = body.match(
     new RegExp(`<!--\\s*${VALIDATION_REVIEW_MARKER}\\s+({[^]*?})\\s*-->`)
   );
@@ -246,6 +332,13 @@ function parseValidationMarker(body: string): Partial<PrValidationStatus> {
       blockingFindings?: unknown;
       advisoryFindings?: unknown;
       specSkipped?: unknown;
+      baseRefOid?: unknown;
+      snapshotKey?: unknown;
+      policyDigest?: unknown;
+      issueContextDigest?: unknown;
+      runtimeFingerprint?: unknown;
+      outcome?: unknown;
+      schemaVersion?: unknown;
     };
     return {
       headRefOid:
@@ -261,6 +354,27 @@ function parseValidationMarker(body: string): Partial<PrValidationStatus> {
       specSkipped:
         typeof parsed.specSkipped === "boolean"
           ? parsed.specSkipped
+          : undefined,
+      baseRefOid:
+        typeof parsed.baseRefOid === "string" ? parsed.baseRefOid : undefined,
+      snapshotKey:
+        typeof parsed.snapshotKey === "string" ? parsed.snapshotKey : undefined,
+      policyDigest:
+        typeof parsed.policyDigest === "string"
+          ? parsed.policyDigest
+          : undefined,
+      issueContextDigest:
+        typeof parsed.issueContextDigest === "string"
+          ? parsed.issueContextDigest
+          : undefined,
+      runtimeFingerprint:
+        typeof parsed.runtimeFingerprint === "string"
+          ? parsed.runtimeFingerprint
+          : undefined,
+      outcome: typeof parsed.outcome === "string" ? parsed.outcome : undefined,
+      schemaVersion:
+        typeof parsed.schemaVersion === "number"
+          ? parsed.schemaVersion
           : undefined,
     };
   } catch {

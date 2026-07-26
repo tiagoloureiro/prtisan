@@ -1,6 +1,7 @@
 import { CommandError, type CommandRunner } from "./exec.js";
 import { mustRun, runJson } from "./exec.js";
 import { writeText } from "./fs.js";
+import { sanitizeForGitHub } from "./redaction.js";
 import type {
   Issue,
   IssueRef,
@@ -10,6 +11,7 @@ import type {
   PullRequestReviewSummary,
   ReviewFinding,
 } from "./types.js";
+import { stableDigest } from "./validation-hardening.js";
 
 const ISSUE_JSON_FIELDS = [
   "number",
@@ -259,7 +261,7 @@ export class GitHubClient {
       ],
       {
         cwd: this.cwd,
-        input: JSON.stringify({ body }),
+        input: JSON.stringify({ body: sanitizeGitHubText(body) }),
       }
     );
   }
@@ -485,8 +487,11 @@ export class GitHubClient {
         input: JSON.stringify({
           commit_id: input.commitId,
           event: input.event,
-          body: input.body,
-          comments: input.comments,
+          body: sanitizeGitHubText(input.body),
+          comments: input.comments.map((comment) => ({
+            ...comment,
+            body: sanitizeGitHubText(comment.body),
+          })),
         }),
       }
     );
@@ -668,8 +673,91 @@ export function pullRequestCheckStatus(
   };
 }
 
+export function actionablePullRequestCheckEvidence(
+  evidence: readonly PullRequestCheckEvidence[],
+  limits: {
+    readonly maxLogChars: number;
+    readonly maxTotalChars: number;
+  }
+): PullRequestCheckEvidence[] {
+  const actionable: PullRequestCheckEvidence[] = [];
+  let remaining = limits.maxTotalChars;
+
+  for (const check of evidence) {
+    const status = check.status.toUpperCase();
+    const conclusion = check.conclusion?.toUpperCase() ?? "";
+    if (
+      status !== "COMPLETED" ||
+      !["FAILURE", "FAILED"].includes(conclusion) ||
+      check.logError ||
+      !check.runId
+    ) {
+      continue;
+    }
+    const log = sanitizeEvidence(check.logExcerpt ?? "").trim();
+    if (!log || isInfrastructureEvidence(log)) continue;
+    const excerpt = log.slice(-Math.min(limits.maxLogChars, remaining));
+    if (!excerpt) break;
+    remaining -= excerpt.length;
+    actionable.push({ ...check, logExcerpt: excerpt });
+    if (remaining <= 0) break;
+  }
+
+  return actionable;
+}
+
+function isInfrastructureEvidence(value: string): boolean {
+  return /command not found|cannot connect to the docker daemon|runner (?:is )?(?:offline|unavailable|lost)|failed to (?:start|initialize)|startup failure|no space left on device|network is unreachable|temporary failure|could not resolve host|service unavailable|rate limit(?:ed)?/i.test(
+    value
+  );
+}
+
+export function ciFailureFingerprint(
+  headRefOid: string,
+  evidence: readonly PullRequestCheckEvidence[]
+): string {
+  return stableDigest({
+    headRefOid,
+    checks: evidence.map((check) => ({
+      name: check.name,
+      runId: check.runId,
+      conclusion: check.conclusion,
+      evidence: normalizeFailureEvidence(check.logExcerpt ?? ""),
+    })),
+  });
+}
+
+export function ciFailureEvidenceSignature(
+  evidence: readonly PullRequestCheckEvidence[]
+): string {
+  return stableDigest(
+    evidence.map((check) => ({
+      name: check.name.trim().toLowerCase(),
+      conclusion: check.conclusion?.toUpperCase(),
+      evidence: normalizeFailureEvidence(check.logExcerpt ?? ""),
+    }))
+  );
+}
+
 export function reviewFindingBody(finding: ReviewFinding): string {
   return [`**${finding.axis}: ${finding.title}**`, "", finding.body].join("\n");
+}
+
+function sanitizeEvidence(value: string): string {
+  return sanitizeForGitHub(value);
+}
+
+export function sanitizeGitHubText(value: string): string {
+  return sanitizeForGitHub(value);
+}
+
+function normalizeFailureEvidence(value: string): string {
+  return sanitizeEvidence(value)
+    .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, "")
+    .replace(/\b(?:0x)?[a-f0-9]{8,40}\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(-4_000);
 }
 
 function normalizePullRequestCheck(raw: unknown): PullRequestCheck {

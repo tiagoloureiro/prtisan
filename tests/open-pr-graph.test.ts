@@ -122,7 +122,7 @@ describe("open PR graph", () => {
         latestReviews: [
           {
             state: "COMMENTED",
-            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"headRefOid":"current-head","blockingFindings":0,"advisoryFindings":1,"specSkipped":true} -->`,
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"schemaVersion":2,"headRefOid":"current-head","baseRefOid":"base-sha","snapshotKey":"snapshot","policyDigest":"policy","issueContextDigest":"issues","runtimeFingerprint":"runtime","outcome":"passed","blockingFindings":0,"advisoryFindings":1,"specSkipped":true} -->`,
             submittedAt: "2026-07-23T00:00:00Z",
           },
         ],
@@ -145,7 +145,7 @@ describe("open PR graph", () => {
         latestReviews: [
           {
             state: "COMMENTED",
-            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"headRefOid":"old-head","blockingFindings":0,"advisoryFindings":0,"specSkipped":true} -->`,
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"schemaVersion":2,"headRefOid":"old-head","baseRefOid":"base-sha","snapshotKey":"snapshot","policyDigest":"policy","issueContextDigest":"issues","runtimeFingerprint":"runtime","outcome":"passed","blockingFindings":0,"advisoryFindings":0,"specSkipped":true} -->`,
           },
         ],
       })
@@ -155,5 +155,58 @@ describe("open PR graph", () => {
       state: "stale",
       headRefOid: "old-head",
     });
+  });
+
+  test("treats malformed and legacy validation markers as stale once", () => {
+    const malformed = validationStatusFromPr(
+      pullRequest({
+        latestReviews: [
+          {
+            state: "COMMENTED",
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {not-json} -->`,
+          },
+        ],
+      })
+    );
+    const legacy = validationStatusFromPr(
+      pullRequest({
+        headRefOid: "current-head",
+        latestReviews: [
+          {
+            state: "COMMENTED",
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"headRefOid":"current-head","blockingFindings":0,"advisoryFindings":0} -->`,
+          },
+        ],
+      })
+    );
+
+    expect(malformed.state).toBe("stale");
+    expect(legacy.state).toBe("stale");
+  });
+
+  test("treats incomplete or unknown v2 validation metadata as stale", () => {
+    const incomplete = validationStatusFromPr(
+      pullRequest({
+        latestReviews: [
+          {
+            state: "COMMENTED",
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"schemaVersion":2,"headRefOid":"head-sha","baseRefOid":"base-sha","outcome":"passed","blockingFindings":0,"advisoryFindings":0} -->`,
+          },
+        ],
+      })
+    );
+    const unknownOutcome = validationStatusFromPr(
+      pullRequest({
+        latestReviews: [
+          {
+            state: "COMMENTED",
+            body: `<!-- ${VALIDATION_REVIEW_MARKER} {"schemaVersion":2,"headRefOid":"head-sha","baseRefOid":"base-sha","snapshotKey":"snapshot","policyDigest":"policy","issueContextDigest":"issues","runtimeFingerprint":"runtime","outcome":"surprise","blockingFindings":0,"advisoryFindings":0} -->`,
+          },
+        ],
+      })
+    );
+
+    expect(incomplete.state).toBe("stale");
+    expect(unknownOutcome.state).toBe("stale");
   });
 });

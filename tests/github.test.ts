@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import type { CommandOptions, CommandResult } from "@/exec.js";
 import {
+  actionablePullRequestCheckEvidence,
+  ciFailureFingerprint,
   GitHubClient,
   isPullRequestGreen,
   pullRequestCheckStatus,
+  sanitizeGitHubText,
 } from "@/github.js";
 
 import { FakeRunner, pullRequest } from "./helpers.js";
@@ -291,6 +294,106 @@ describe("GitHubClient", () => {
       detailsUrl: "https://ci.example.test/build/1",
     });
     expect(external?.logExcerpt).toBeUndefined();
+  });
+
+  test("qualifies only completed code failures with fetched logs", () => {
+    const evidence = actionablePullRequestCheckEvidence(
+      [
+        {
+          name: "cancelled",
+          status: "COMPLETED",
+          conclusion: "CANCELLED",
+          runId: "1",
+          logExcerpt: "cancelled",
+        },
+        {
+          name: "startup",
+          status: "COMPLETED",
+          conclusion: "STARTUP_FAILURE",
+          runId: "2",
+          logExcerpt: "runner unavailable",
+        },
+        {
+          name: "external",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          logExcerpt: "external summary only",
+        },
+        {
+          name: "fetch-error",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "3",
+          logError: "forbidden",
+        },
+        {
+          name: "missing-toolchain",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "5",
+          logExcerpt: "pnpm: command not found",
+        },
+        {
+          name: "actionable",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "4",
+          logExcerpt:
+            "AWS_SECRET_ACCESS_KEY=super-secret-value\n/home/tiago/titally/src/a.ts failed",
+        },
+      ],
+      { maxLogChars: 200, maxTotalChars: 200 }
+    );
+
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.name).toBe("actionable");
+    expect(evidence[0]?.logExcerpt).toContain(
+      "AWS_SECRET_ACCESS_KEY=[REDACTED]"
+    );
+    expect(evidence[0]?.logExcerpt).not.toContain("super-secret-value");
+  });
+
+  test("fingerprints normalized CI evidence by head and run identity", () => {
+    const first = ciFailureFingerprint("head-a", [
+      {
+        name: "check",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        runId: "101",
+        logExcerpt:
+          "2026-07-26T12:30:00Z TOKEN=secret-value assertion 0xabc12345",
+      },
+    ]);
+    const normalizedEquivalent = ciFailureFingerprint("head-a", [
+      {
+        name: "check",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        runId: "101",
+        logExcerpt:
+          "2026-07-26T12:31:00Z TOKEN=another-secret assertion 0xdef67890",
+      },
+    ]);
+    const differentRun = ciFailureFingerprint("head-a", [
+      {
+        name: "check",
+        status: "COMPLETED",
+        conclusion: "FAILURE",
+        runId: "102",
+        logExcerpt: "assertion",
+      },
+    ]);
+
+    expect(normalizedEquivalent).toBe(first);
+    expect(differentRun).not.toBe(first);
+  });
+
+  test("removes host filesystem paths from GitHub-bound text", () => {
+    expect(
+      sanitizeGitHubText(
+        "See /home/tiago/titally/src/a.ts and /tmp/prtisan-run/log.txt"
+      )
+    ).toBe("See [local workspace path] and [temporary path]");
   });
 
   test("creates a new PR when a matching branch only has closed PRs", async () => {

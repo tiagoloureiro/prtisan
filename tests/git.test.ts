@@ -5,6 +5,24 @@ import { GitClient } from "@/git.js";
 import { FakeRunner, testConfig } from "./helpers.js";
 
 describe("GitClient", () => {
+  test("publishes a verified commit with the exact expected remote SHA", async () => {
+    const runner = new FakeRunner();
+    const client = new GitClient(runner, "/repo", testConfig());
+
+    await client.pushVerifiedCommit({
+      branch: "feature",
+      commit: "verified-sha",
+      expectedRemoteSha: "expected-head",
+    });
+
+    expect(runner.calls[0]?.args).toEqual([
+      "push",
+      "origin",
+      "--force-with-lease=refs/heads/feature:expected-head",
+      "verified-sha:refs/heads/feature",
+    ]);
+  });
+
   test("prepares a branch that is checked out in a managed worktree", async () => {
     const runner = new FakeRunner();
     runner.enqueue("");
@@ -52,5 +70,36 @@ describe("GitClient", () => {
       args: ["clean", "-fd"],
       options: { cwd: "/repo/.sandcastle/worktrees/feature" },
     });
+  });
+
+  test("digests only root and changed-path repository standards at the pinned ref", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue(
+      [
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "packages/a/AGENTS.md",
+        "packages/b/AGENTS.md",
+      ].join("\n")
+    );
+    runner.enqueue("root rules");
+    runner.enqueue("contribution rules");
+    runner.enqueue("package a rules");
+    const client = new GitClient(runner, "/repo", testConfig());
+
+    const standards = await client.readStandardsAtRef("head-sha", [
+      "packages/a/src/index.ts",
+    ]);
+
+    expect(standards).toEqual([
+      "AGENTS.md\nroot rules",
+      "CONTRIBUTING.md\ncontribution rules",
+      "packages/a/AGENTS.md\npackage a rules",
+    ]);
+    expect(
+      runner.calls.some((call) =>
+        call.args.includes("head-sha:packages/b/AGENTS.md")
+      )
+    ).toBe(false);
   });
 });

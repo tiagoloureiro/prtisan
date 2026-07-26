@@ -1,5 +1,5 @@
 import { reviewFindingBody } from "./github.js";
-import type { PullRequest, ReviewFinding } from "./types.js";
+import type { PullRequest, ReviewFinding, ValidationOutcome } from "./types.js";
 
 interface DiffLine {
   readonly path: string;
@@ -26,6 +26,17 @@ export interface PreparedReview {
   readonly summaryCount: number;
 }
 
+export interface ValidationReviewMetadata {
+  readonly schemaVersion: 2;
+  readonly baseRefOid: string;
+  readonly snapshotKey: string;
+  readonly policyDigest: string;
+  readonly issueContextDigest: string;
+  readonly runtimeFingerprint: string;
+  readonly outcome: ValidationOutcome["kind"];
+  readonly findingIds: readonly string[];
+}
+
 export const VALIDATION_REVIEW_MARKER = "agent-train:validation";
 
 export function preparePullRequestReview(input: {
@@ -33,6 +44,7 @@ export function preparePullRequestReview(input: {
   readonly diff: string;
   readonly findings: readonly ReviewFinding[];
   readonly specSkipped?: boolean;
+  readonly metadata?: ValidationReviewMetadata;
 }): PreparedReview {
   const diffLines = parseUnifiedDiff(input.diff);
   const comments: {
@@ -78,6 +90,22 @@ export function preparePullRequestReview(input: {
         (finding) => finding.severity === "advisory"
       ).length,
       specSkipped: Boolean(input.specSkipped),
+      schemaVersion: input.metadata?.schemaVersion ?? 2,
+      baseRefOid: input.metadata?.baseRefOid ?? input.pr.baseRefOid,
+      snapshotKey: input.metadata?.snapshotKey,
+      policyDigest: input.metadata?.policyDigest,
+      issueContextDigest: input.metadata?.issueContextDigest,
+      runtimeFingerprint: input.metadata?.runtimeFingerprint,
+      outcome:
+        input.metadata?.outcome ??
+        (input.findings.some((finding) => finding.severity === "blocking")
+          ? "blocked"
+          : "passed"),
+      findingIds:
+        input.metadata?.findingIds ??
+        input.findings
+          .map((finding) => finding.findingId)
+          .filter((id): id is string => Boolean(id)),
     }),
     buildReviewSummaryBody(input.findings, summaryFindings),
   ].join("\n");
@@ -96,6 +124,14 @@ function validationMarker(input: {
   readonly blockingFindings: number;
   readonly advisoryFindings: number;
   readonly specSkipped: boolean;
+  readonly schemaVersion: number;
+  readonly baseRefOid: string;
+  readonly snapshotKey?: string;
+  readonly policyDigest?: string;
+  readonly issueContextDigest?: string;
+  readonly runtimeFingerprint?: string;
+  readonly outcome: ValidationOutcome["kind"];
+  readonly findingIds: readonly string[];
 }): string {
   return `<!-- ${VALIDATION_REVIEW_MARKER} ${JSON.stringify(input)} -->`;
 }

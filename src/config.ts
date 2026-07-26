@@ -5,6 +5,7 @@ import { resolvePath } from "./path.js";
 import type { AgentTrainConfig } from "./types.js";
 
 const ReasoningSchema = z.enum(["low", "medium", "high", "xhigh"]);
+const SessionPolicySchema = z.enum(["none", "failures", "all"]);
 const DEFAULT_MODELS = {
   repair: "gpt-5.6-terra",
   review: "gpt-5.6-luna",
@@ -23,11 +24,41 @@ const DEFAULT_DOCKER = {
   cpus: 2,
   mounts: [],
 } satisfies AgentTrainConfig["docker"];
+const DEFAULT_RUNTIME = {
+  autoProvision: true,
+  verificationMode: "auto",
+  probes: [],
+  verification: [],
+} satisfies AgentTrainConfig["runtime"];
+const DEFAULT_VALIDATION = {
+  maxRepairRounds: 1,
+  maxAgentRunsPerHead: 4,
+  maxWallTimeMs: 30 * 60 * 1000,
+  promptCharBudget: 32_000,
+  maxCheckLogChars: 8_000,
+  maxCheckEvidenceChars: 16_000,
+  leaseTtlMs: 2 * 60 * 60 * 1000,
+  cacheTtlDays: 14,
+} satisfies AgentTrainConfig["validation"];
 const DEFAULT_RETENTION = {
   ttlDays: 14,
   maxLogBytes: 10 * 1024 * 1024,
   keepSessions: true,
+  sessionPolicy: "failures",
+  maxRuns: 50,
+  maxTotalBytes: 512 * 1024 * 1024,
 } satisfies AgentTrainConfig["retention"];
+
+const SandboxCommandSchema = z.object({
+  name: z.string().min(1),
+  command: z.string().min(1),
+  timeoutMs: z
+    .number()
+    .int()
+    .positive()
+    .default(10 * 60 * 1000),
+  env: z.record(z.string(), z.string()).optional(),
+});
 
 const ConfigSchema = z.object({
   repo: z.string().min(1),
@@ -77,6 +108,67 @@ const ConfigSchema = z.object({
         .default([]),
     })
     .default(DEFAULT_DOCKER),
+  runtime: z
+    .object({
+      autoProvision: z.boolean().default(DEFAULT_RUNTIME.autoProvision),
+      verificationMode: z
+        .enum(["auto", "explicit"])
+        .default(DEFAULT_RUNTIME.verificationMode),
+      probes: z.array(SandboxCommandSchema).default([]),
+      bootstrap: SandboxCommandSchema.optional(),
+      verification: z.array(SandboxCommandSchema).default([]),
+    })
+    .default(DEFAULT_RUNTIME),
+  validation: z
+    .object({
+      maxRepairRounds: z
+        .number()
+        .int()
+        .min(0)
+        .max(DEFAULT_VALIDATION.maxRepairRounds)
+        .default(DEFAULT_VALIDATION.maxRepairRounds),
+      maxAgentRunsPerHead: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.maxAgentRunsPerHead)
+        .default(DEFAULT_VALIDATION.maxAgentRunsPerHead),
+      maxWallTimeMs: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.maxWallTimeMs)
+        .default(DEFAULT_VALIDATION.maxWallTimeMs),
+      promptCharBudget: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.promptCharBudget)
+        .default(DEFAULT_VALIDATION.promptCharBudget),
+      maxCheckLogChars: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.maxCheckLogChars)
+        .default(DEFAULT_VALIDATION.maxCheckLogChars),
+      maxCheckEvidenceChars: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.maxCheckEvidenceChars)
+        .default(DEFAULT_VALIDATION.maxCheckEvidenceChars),
+      leaseTtlMs: z
+        .number()
+        .int()
+        .positive()
+        .default(DEFAULT_VALIDATION.leaseTtlMs),
+      cacheTtlDays: z
+        .number()
+        .int()
+        .positive()
+        .default(DEFAULT_VALIDATION.cacheTtlDays),
+    })
+    .default(DEFAULT_VALIDATION),
   retention: z
     .object({
       ttlDays: z.number().int().positive().default(DEFAULT_RETENTION.ttlDays),
@@ -85,9 +177,28 @@ const ConfigSchema = z.object({
         .int()
         .positive()
         .default(DEFAULT_RETENTION.maxLogBytes),
-      keepSessions: z.boolean().default(DEFAULT_RETENTION.keepSessions),
+      keepSessions: z.boolean().optional(),
+      sessionPolicy: SessionPolicySchema.optional(),
+      maxRuns: z.number().int().positive().default(DEFAULT_RETENTION.maxRuns),
+      maxTotalBytes: z
+        .number()
+        .int()
+        .positive()
+        .default(DEFAULT_RETENTION.maxTotalBytes),
     })
-    .default(DEFAULT_RETENTION),
+    .default(DEFAULT_RETENTION)
+    .transform((value) => {
+      const sessionPolicy =
+        value.sessionPolicy ??
+        (value.keepSessions === false
+          ? "none"
+          : DEFAULT_RETENTION.sessionPolicy);
+      return {
+        ...value,
+        keepSessions: sessionPolicy !== "none",
+        sessionPolicy,
+      };
+    }),
 });
 
 export const DEFAULT_CONFIG_PATH = ".sandcastle/agent-train.config.json";
@@ -112,6 +223,12 @@ export function defaultConfig(input: {
       ...DEFAULT_DOCKER,
       mounts: [...DEFAULT_DOCKER.mounts],
     },
+    runtime: {
+      ...DEFAULT_RUNTIME,
+      probes: [...DEFAULT_RUNTIME.probes],
+      verification: [...DEFAULT_RUNTIME.verification],
+    },
+    validation: { ...DEFAULT_VALIDATION },
     retention: { ...DEFAULT_RETENTION },
   };
 }
