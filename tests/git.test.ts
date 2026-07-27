@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { GitClient } from "@/git.js";
+import { prtisanRepositoryDataPath } from "@/prtisan-paths.js";
 
 import { FakeRunner, testConfig } from "./helpers.js";
 
@@ -23,6 +24,26 @@ describe("GitClient", () => {
     ]);
   });
 
+  test("publishes ordinary repairs only as fast-forward additions", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue("");
+    runner.enqueue("expected-head\trefs/heads/feature\n");
+    runner.enqueue("");
+    const client = new GitClient(runner, "/repo", testConfig());
+
+    await client.pushAdditiveCommit({
+      branch: "feature",
+      commit: "repair-sha",
+      expectedRemoteSha: "expected-head",
+    });
+
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      ["merge-base", "--is-ancestor", "expected-head", "repair-sha"],
+      ["ls-remote", "--exit-code", "--heads", "origin", "refs/heads/feature"],
+      ["push", "origin", "repair-sha:refs/heads/feature"],
+    ]);
+  });
+
   test("prepares a branch that is checked out in a managed worktree", async () => {
     const runner = new FakeRunner();
     runner.enqueue("");
@@ -35,7 +56,7 @@ describe("GitClient", () => {
         "HEAD main-sha",
         "branch refs/heads/main",
         "",
-        "worktree /repo/.sandcastle/worktrees/feature",
+        `worktree ${prtisanRepositoryDataPath("/repo", "runs", "fixture", "worktrees", "feature")}`,
         "HEAD old-feature-sha",
         "branch refs/heads/feature",
         "",
@@ -63,12 +84,28 @@ describe("GitClient", () => {
     expect(runner.calls).toContainEqual({
       command: "git",
       args: ["reset", "--hard", "origin/feature"],
-      options: { cwd: "/repo/.sandcastle/worktrees/feature" },
+      options: {
+        cwd: prtisanRepositoryDataPath(
+          "/repo",
+          "runs",
+          "fixture",
+          "worktrees",
+          "feature"
+        ),
+      },
     });
     expect(runner.calls).toContainEqual({
       command: "git",
       args: ["clean", "-fd"],
-      options: { cwd: "/repo/.sandcastle/worktrees/feature" },
+      options: {
+        cwd: prtisanRepositoryDataPath(
+          "/repo",
+          "runs",
+          "fixture",
+          "worktrees",
+          "feature"
+        ),
+      },
     });
   });
 

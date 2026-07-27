@@ -2,6 +2,7 @@ import { rename, unlink } from "node:fs/promises";
 
 import { ensureDir, pathExists, readJson, writeJson } from "./fs.js";
 import { joinPath } from "./path.js";
+import { prtisanRepositoryDataPath } from "./prtisan-paths.js";
 import type { ReviewAxis, ReviewReport } from "./types.js";
 import { stableDigest } from "./validation-hardening.js";
 
@@ -18,7 +19,8 @@ export interface ReviewCache {
 export class FileReviewCache implements ReviewCache {
   constructor(
     private readonly cwd: string,
-    private readonly ttlDays: number
+    private readonly ttlDays: number,
+    private readonly storageRoot?: string
   ) {}
 
   async get(key: string): Promise<ReviewReport | undefined> {
@@ -45,7 +47,7 @@ export class FileReviewCache implements ReviewCache {
   async set(key: string, report: ReviewReport): Promise<void> {
     const path = this.path(key);
     const temporaryPath = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    await ensureDir(joinPath(this.cwd, ".sandcastle", "cache", "reviews"));
+    await ensureDir(this.directory());
     await writeJson(temporaryPath, {
       createdAt: new Date().toISOString(),
       report,
@@ -54,12 +56,13 @@ export class FileReviewCache implements ReviewCache {
   }
 
   private path(key: string): string {
-    return joinPath(
-      this.cwd,
-      ".sandcastle",
-      "cache",
-      "reviews",
-      `${stableDigest(key)}.json`
+    return joinPath(this.directory(), `${stableDigest(key)}.json`);
+  }
+
+  private directory(): string {
+    return (
+      this.storageRoot ??
+      prtisanRepositoryDataPath(this.cwd, "cache", "reviews")
     );
   }
 }

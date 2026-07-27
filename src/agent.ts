@@ -12,8 +12,13 @@ import {
   buildMergeStateRepairPrompt,
   buildRepairPrompt,
   buildRepairVerificationPrompt,
+  buildRestackConflictRepairPrompt,
   buildReviewPrompt,
 } from "./prompts.js";
+import {
+  prtisanRepositoryDataPath,
+  resolveCodexHome,
+} from "./prtisan-paths.js";
 import type { PreparedRuntime } from "./runtime.js";
 import type {
   AgentRunOutcome,
@@ -28,7 +33,7 @@ import type {
 } from "./types.js";
 import { isHighRiskPath } from "./validation-hardening.js";
 
-const SANDBOX_CODEX_HOME = "/home/agent/.codex-agent-train";
+const SANDBOX_CODEX_HOME = "/home/agent/.codex-prtisan";
 const ReviewOutputSchema = z.object({
   axis: z.enum(["standards", "spec"]).optional(),
   summary: z.string().default(""),
@@ -51,7 +56,10 @@ const RepairOutputSchema = z.object({
   addressedFindingIds: z.array(z.string()).default([]),
   changedPaths: z.array(z.string()).default([]),
   summary: z.string().default(""),
-  limitations: z.array(z.string()).default([]),
+  limitations: z.preprocess(
+    (value) => (typeof value === "string" ? [value] : value),
+    z.array(z.string()).default([])
+  ),
 });
 const RepairVerificationOutputSchema = z.object({
   summary: z.string().default(""),
@@ -145,6 +153,19 @@ export interface RepairMergeStateInput {
   readonly runtime?: PreparedRuntime;
 }
 
+export interface RepairRestackConflictInput {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runId: string;
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly parentContract: string;
+  readonly childContract: string;
+  readonly uniqueDiff: string;
+  readonly runtime?: PreparedRuntime;
+}
+
 export interface ReviewIssueBranchInput {
   readonly cwd: string;
   readonly config: AgentTrainConfig;
@@ -190,6 +211,7 @@ export type AgentRepairTask =
   | ({ readonly kind: "pull-request" } & RepairPullRequestInput)
   | ({ readonly kind: "ci-failure" } & RepairCiFailureInput)
   | ({ readonly kind: "merge-state" } & RepairMergeStateInput)
+  | ({ readonly kind: "restack-conflict" } & RepairRestackConflictInput)
   | ({ readonly kind: "issue-branch" } & RepairIssueBranchInput);
 
 export interface AgentRunner {
@@ -312,6 +334,27 @@ export class SandcastleCodexRunner implements AgentRunner {
       });
     }
 
+    if (input.kind === "restack-conflict") {
+      return this.runCodex({
+        cwd: input.cwd,
+        config: input.config,
+        runId: input.runId,
+        branch: input.branch,
+        baseBranch: input.baseBranch,
+        name: `repair-restack-${input.prNumber}`,
+        model: input.config.models.repair,
+        effort: input.config.reasoning.repair,
+        runtime: input.runtime,
+        prompt: buildRestackConflictRepairPrompt(input),
+        maxIterations: 1,
+        structuredOutput: {
+          tag: "repair",
+          schema: RepairOutputSchema,
+          maxRetries: 1,
+        },
+      });
+    }
+
     return this.runCodex({
       cwd: input.cwd,
       config: input.config,
@@ -397,15 +440,12 @@ export class SandcastleCodexRunner implements AgentRunner {
     }
     const codexHome = await prepareCodexHome(input.cwd, input.config);
     const logPath = joinPath(
-      input.cwd,
-      ".sandcastle",
-      "runs",
-      input.runId,
+      prtisanRepositoryDataPath(input.cwd, "runs", input.runId),
       "logs",
       `${input.name}-${Date.now()}.log`
     );
     await ensureDir(
-      joinPath(input.cwd, ".sandcastle", "runs", input.runId, "logs")
+      prtisanRepositoryDataPath(input.cwd, "runs", input.runId, "logs")
     );
 
     const sandcastle = await import("@ai-hero/sandcastle");
@@ -432,6 +472,9 @@ export class SandcastleCodexRunner implements AgentRunner {
           maxRetries: input.structuredOutput.maxRetries,
         })
       : undefined;
+    const branchHeadBeforeRun = input.cleanupBranch
+      ? undefined
+      : await resolveLocalBranchHead(this.runner, input.cwd, input.branch);
 
     const startedAt = Date.now();
     let result;
@@ -509,6 +552,23 @@ export class SandcastleCodexRunner implements AgentRunner {
 
     const structuredOutput = "output" in result ? result.output : undefined;
     const iteration = result.iterations?.at?.(-1);
+    const reportedCommits = Array.isArray(result.commits)
+      ? result.commits
+          .map((commit: { sha?: string }) => commit.sha)
+          .filter(
+            (sha: string | undefined): sha is string =>
+              typeof sha === "string" && sha.length > 0
+          )
+      : [];
+    const commits = branchHeadBeforeRun
+      ? await reconcileRunCommits({
+          runner: this.runner,
+          cwd: input.cwd,
+          branch: input.branch,
+          branchHeadBeforeRun,
+          reportedCommits,
+        })
+      : reportedCommits;
     if (
       input.config.retention.sessionPolicy === "failures" &&
       iteration?.sessionFilePath
@@ -518,14 +578,7 @@ export class SandcastleCodexRunner implements AgentRunner {
 
     return {
       branch: result.branch ?? input.branch,
-      commits: Array.isArray(result.commits)
-        ? result.commits
-            .map((commit: { sha?: string }) => commit.sha)
-            .filter(
-              (sha: string | undefined): sha is string =>
-                typeof sha === "string" && sha.length > 0
-            )
-        : [],
+      commits,
       stdout: String(result.stdout ?? ""),
       structuredOutput,
       logFilePath: result.logFilePath ?? logPath,
@@ -540,6 +593,53 @@ export class SandcastleCodexRunner implements AgentRunner {
   }
 }
 
+async function resolveLocalBranchHead(
+  runner: CommandRunner,
+  cwd: string,
+  branch: string
+): Promise<string | undefined> {
+  try {
+    const result = await runner.run(
+      "git",
+      ["rev-parse", "--verify", `refs/heads/${branch}`],
+      { cwd }
+    );
+    const sha = result.stdout.trim();
+    return result.exitCode === 0 && sha ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function reconcileRunCommits(input: {
+  readonly runner: CommandRunner;
+  readonly cwd: string;
+  readonly branch: string;
+  readonly branchHeadBeforeRun: string;
+  readonly reportedCommits: readonly string[];
+}): Promise<readonly string[]> {
+  try {
+    const result = await input.runner.run(
+      "git",
+      [
+        "rev-list",
+        "--reverse",
+        `${input.branchHeadBeforeRun}..refs/heads/${input.branch}`,
+      ],
+      { cwd: input.cwd }
+    );
+    if (result.exitCode !== 0) return input.reportedCommits;
+
+    const observedCommits = result.stdout
+      .split(/\r?\n/)
+      .map((sha) => sha.trim())
+      .filter(Boolean);
+    return observedCommits.length > 0 ? observedCommits : input.reportedCommits;
+  } catch {
+    return input.reportedCommits;
+  }
+}
+
 function isPreAgentInfrastructureFailure(message: string): boolean {
   return /bootstrap|onSandboxReady|sandbox hook|command not found|exit(?:ed)? (?:with )?(?:code )?127|cannot connect to the docker daemon|no such image|network is unreachable|could not resolve host/i.test(
     message
@@ -550,7 +650,7 @@ export async function prepareCodexHome(
   cwd: string,
   config: AgentTrainConfig
 ): Promise<string> {
-  const codexHome = resolvePath(cwd, config.docker.codexHome);
+  const codexHome = resolveCodexHome(cwd, config.docker.codexHome);
   const skillsDir = joinPath(codexHome, "skills", "code-review");
   await ensureDir(skillsDir);
   await ensureDir(joinPath(codexHome, "sessions"));

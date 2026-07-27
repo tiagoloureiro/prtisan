@@ -8,7 +8,7 @@ import {
 } from "@/merge-readiness.js";
 import { loadOpenPrGraph, type OpenPrGraph } from "@/open-pr-graph.js";
 import type { RepairAttemptStore } from "@/repair-attempt-store.js";
-import { writeRunRecord } from "@/run-record.js";
+import { appendRunEvent, writeRunRecord } from "@/run-record.js";
 import type { RuntimeProvider, VerificationRunner } from "@/runtime.js";
 import { restackAfterMerge } from "@/train-restacker.js";
 import type { AgentTrainConfig } from "@/types.js";
@@ -46,16 +46,39 @@ export interface MergeResult {
   readonly merged: readonly MergedPullRequest[];
 }
 
+class MergeRunError extends Error {
+  constructor(
+    message: string,
+    readonly merged: readonly MergedPullRequest[],
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = "MergeRunError";
+  }
+}
+
 export async function executeMerge(
   input: MergeInput,
   deps: MergeDeps
 ): Promise<MergeResult> {
   const runId = input.runId ?? runIdFromDate("merge");
   const startedAt = new Date().toISOString();
+  await recordRun(input, deps, {
+    schemaVersion: 2,
+    runId,
+    command: "merge",
+    repo: input.config.repo,
+    startedAt,
+    status: "running",
+  });
+  await recordEvent(input, deps, runId, {
+    type: "command_started",
+    message: "Merge command started.",
+  });
   try {
     const result = await executeMergeRun(input, deps, runId);
-    await writeRunRecord(input.cwd, {
-      schemaVersion: 1,
+    await recordRun(input, deps, {
+      schemaVersion: 2,
       runId,
       command: "merge",
       repo: input.config.repo,
@@ -63,21 +86,60 @@ export async function executeMerge(
       completedAt: new Date().toISOString(),
       status: "completed",
       result,
-    }).catch(() => undefined);
+    });
+    await recordEvent(input, deps, runId, {
+      type: "command_completed",
+      message: "Merge command completed.",
+      data: { mergedPullRequests: result.merged.map((item) => item.number) },
+    });
     return result;
   } catch (error) {
-    await writeRunRecord(input.cwd, {
-      schemaVersion: 1,
+    const message = error instanceof Error ? error.message : String(error);
+    await recordRun(input, deps, {
+      schemaVersion: 2,
       runId,
       command: "merge",
       repo: input.config.repo,
       startedAt,
       completedAt: new Date().toISOString(),
       status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-    }).catch(() => undefined);
+      error: message,
+      result:
+        error instanceof MergeRunError
+          ? { repo: input.config.repo, merged: error.merged }
+          : undefined,
+    });
+    await recordEvent(input, deps, runId, {
+      type: "command_failed",
+      message,
+    });
     throw error;
   }
+}
+
+async function recordRun(
+  input: MergeInput,
+  deps: Pick<MergeDeps, "log">,
+  record: Parameters<typeof writeRunRecord>[1]
+): Promise<void> {
+  await writeRunRecord(input.cwd, record).catch((error) => {
+    deps.log?.(
+      `Run record update failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  });
+}
+
+async function recordEvent(
+  input: MergeInput,
+  deps: Pick<MergeDeps, "log">,
+  runId: string,
+  event: Parameters<typeof appendRunEvent>[2]
+): Promise<void> {
+  await appendRunEvent(input.cwd, runId, event).catch((error) => {
+    deps.log?.(
+      `Run event update failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  });
 }
 
 async function executeMergeRun(
@@ -86,61 +148,66 @@ async function executeMergeRun(
   runId: string
 ): Promise<MergeResult> {
   const merged: MergedPullRequest[] = [];
-  let graph = await loadCurrentGraph(input, deps);
+  try {
+    let graph = await loadCurrentGraph(input, deps);
 
-  while (true) {
-    if (graph.topologicalOrder.length === 0) break;
+    while (true) {
+      if (graph.topologicalOrder.length === 0) break;
 
-    const prNumber = graph.topologicalOrder[0] as number;
-    const ready = await preparePullRequestForMerge(
-      {
-        cwd: input.cwd,
-        config: input.config,
-        graph,
-        prNumber,
-        runId,
-      },
-      deps
-    );
-    graph = ready.graph;
-    const node = ready.node;
+      const prNumber = graph.topologicalOrder[0] as number;
+      const ready = await preparePullRequestForMerge(
+        {
+          cwd: input.cwd,
+          config: input.config,
+          graph,
+          prNumber,
+          runId,
+        },
+        deps
+      );
+      graph = ready.graph;
+      const node = ready.node;
 
-    deps.log?.(`Squash-merging PR #${node.pr.number}`);
-    await deps.github.mergePullRequest(
-      input.config.repo,
-      node.pr.number,
-      node.pr.headRefOid,
-      "squash"
-    );
-    const mergedPr = await deps.github.waitForPullRequestMerged(
-      input.config.repo,
-      node.pr.number
-    );
-    merged.push({
-      number: mergedPr.number,
-      url: mergedPr.url,
-      headRefName: mergedPr.headRefName,
-      headRefOid: mergedPr.headRefOid,
-    });
+      deps.log?.(`Squash-merging PR #${node.pr.number}`);
+      await deps.github.mergePullRequest(
+        input.config.repo,
+        node.pr.number,
+        node.pr.headRefOid,
+        "squash"
+      );
+      const mergedPr = await deps.github.waitForPullRequestMerged(
+        input.config.repo,
+        node.pr.number
+      );
+      merged.push({
+        number: mergedPr.number,
+        url: mergedPr.url,
+        headRefName: mergedPr.headRefName,
+        headRefOid: mergedPr.headRefOid,
+      });
 
-    const restacked = await restackAfterMerge(
-      {
-        cwd: input.cwd,
-        config: input.config,
-        previousGraph: graph,
-        mergedPrNumber: node.pr.number,
-        runId,
-      },
-      deps
-    );
-    if (restacked.affected.length > 0) {
-      if (input.validateAffected ?? true) {
+      const restacked = await restackAfterMerge(
+        {
+          cwd: input.cwd,
+          config: input.config,
+          previousGraph: graph,
+          mergedPrNumber: node.pr.number,
+          runId,
+        },
+        deps
+      );
+      if (restacked.affected.length > 0 && (input.validateAffected ?? true)) {
         await deps.validatePullRequests?.(restacked.affected);
       }
-    }
 
-    await deps.git.deleteRemoteBranch(node.pr.headRefName);
-    graph = await loadCurrentGraph(input, deps);
+      graph = await loadCurrentGraph(input, deps);
+    }
+  } catch (error) {
+    throw new MergeRunError(
+      error instanceof Error ? error.message : String(error),
+      [...merged],
+      { cause: error }
+    );
   }
 
   return {

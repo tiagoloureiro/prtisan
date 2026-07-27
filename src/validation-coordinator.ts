@@ -6,7 +6,7 @@ import {
   type AgentRunner,
 } from "./agent.js";
 import type { GitClient } from "./git.js";
-import type { GitHubClient } from "./github.js";
+import { type GitHubClient, managedCommentSection } from "./github.js";
 import { validationStatusFromPr } from "./open-pr-graph.js";
 import {
   preparePullRequestReview,
@@ -73,6 +73,8 @@ export interface ValidationRequest {
   readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
   readonly repair: boolean;
+  readonly remainingRepairRounds?: number;
+  readonly repairRound?: number;
 }
 
 export interface CoordinatedValidationResult {
@@ -130,7 +132,7 @@ export class ValidationCoordinator {
     const standardsContents =
       typeof this.deps.git.readStandardsAtRef === "function"
         ? await metrics.stage("standards-context", () =>
-            this.deps.git.readStandardsAtRef(pr.headRefOid, changedFiles)
+            this.deps.git.readStandardsAtRef(pr.baseRefOid, changedFiles)
           )
         : [];
 
@@ -217,8 +219,10 @@ export class ValidationCoordinator {
         const reports = await metrics.stage("review", () =>
           this.collectReports(request, pr, snapshot, runtime, metrics)
         );
-        const findings = normalizeAndDedupeFindings(
-          reports.flatMap((report) => report.findings)
+        const findings = authorizeFindings(
+          normalizeAndDedupeFindings(
+            reports.flatMap((report) => report.findings)
+          )
         );
         pr = await this.assertFreshOrThrow(request, snapshot);
         const blockers = findings.filter(
@@ -255,10 +259,10 @@ export class ValidationCoordinator {
           };
         }
 
-        if (
-          !request.repair ||
-          request.config.validation.maxRepairRounds === 0
-        ) {
+        const remainingRepairRounds =
+          request.remainingRepairRounds ??
+          request.config.validation.maxRepairRounds;
+        if (!request.repair || remainingRepairRounds === 0) {
           const markerOutcome = {
             kind: "blocked",
             snapshotKey: snapshot.key,
@@ -291,7 +295,11 @@ export class ValidationCoordinator {
         }
 
         return await this.repairAndValidate({
-          request,
+          request: {
+            ...request,
+            remainingRepairRounds,
+            repairRound: request.repairRound ?? 1,
+          },
           pr,
           diff,
           snapshot,
@@ -471,9 +479,9 @@ export class ValidationCoordinator {
   }): Promise<CoordinatedValidationResult> {
     const { request, runtime, metrics } = input;
     let pr = input.pr;
-    const repairBranch = `agent-train/repair/pr-${pr.number}-${safeRunId(
+    const repairBranch = `prtisan/repair/pr-${pr.number}-${safeRunId(
       request.runId
-    )}`;
+    )}-r${request.repairRound ?? 1}`;
     await this.gitMutate(() =>
       this.deps.git.prepareBranchAt(repairBranch, pr.headRefOid)
     );
@@ -505,6 +513,18 @@ export class ValidationCoordinator {
           snapshot: input.snapshot,
           findings: input.findings,
           reason: "The repair agent produced no commit.",
+          metrics,
+        });
+      }
+      if (repairedCommit === pr.headRefOid) {
+        return this.publishNeedsHuman({
+          request,
+          pr,
+          diff: input.diff,
+          snapshot: input.snapshot,
+          findings: input.findings,
+          reason:
+            "The repair agent did not advance the candidate head; bounded convergence stopped to avoid repeating the same repair.",
           metrics,
         });
       }
@@ -655,7 +675,7 @@ export class ValidationCoordinator {
       metrics.assertWithinBudget();
       await metrics.stage("push", () =>
         this.gitMutate(() =>
-          this.deps.git.pushVerifiedCommit({
+          this.deps.git.pushAdditiveCommit({
             branch: pr.headRefName,
             commit: repairedCommit,
             expectedRemoteSha: pr.headRefOid,
@@ -670,59 +690,24 @@ export class ValidationCoordinator {
           repairedCommit
         )
       );
-      const repairedDiff = await metrics.stage("load-repaired-diff", () =>
-        this.deps.github.getPullRequestDiff(request.config.repo, pr.number)
+      this.deps.log?.(
+        `Re-reviewing PR #${pr.number} after repair round ${request.repairRound ?? 1}`
       );
-      const repairedChangedFiles = changedFilesFromDiff(repairedDiff);
-      const repairedStandardsContents =
-        typeof this.deps.git.readStandardsAtRef === "function"
-          ? await metrics.stage("repair-standards-context", () =>
-              this.deps.git.readStandardsAtRef(
-                pr.headRefOid,
-                repairedChangedFiles
-              )
-            )
-          : [];
-      const repairedSnapshot = buildValidationSnapshot({
-        pr,
-        diff: repairedDiff,
-        issue: request.issue,
-        relatedIssues: request.relatedIssues,
-        standardsContents: repairedStandardsContents,
-        runtimeFingerprint: repairedRuntime.fingerprint,
-        config: request.config,
+      const followUp = await this.validate({
+        ...request,
+        remainingRepairRounds: Math.max(
+          0,
+          (request.remainingRepairRounds ?? 1) - 1
+        ),
+        repairRound: (request.repairRound ?? 1) + 1,
       });
-      const findings = normalizeAndDedupeFindings([
-        ...input.findings.filter((finding) => finding.severity === "advisory"),
-        ...targetedFindings,
-      ]);
-      const markerOutcome = {
-        kind: "repaired",
-        snapshotKey: repairedSnapshot.key,
-        verification,
-        metrics: metrics.finish(),
-      } satisfies ValidationOutcome;
-      const reviewEvent = await metrics.stage("publication", () =>
-        this.publishReview(
-          request,
-          pr,
-          repairedDiff,
-          findings,
-          repairedSnapshot,
-          markerOutcome
-        )
-      );
-      const outcome = {
-        ...markerOutcome,
-        metrics: metrics.finish(),
-      };
       return {
-        pr,
-        findings,
+        ...followUp,
         repaired: true,
-        specSkipped: !request.issue,
-        reviewEvent,
-        outcome,
+        outcome:
+          followUp.outcome.kind === "passed"
+            ? { ...followUp.outcome, kind: "repaired" as const }
+            : followUp.outcome,
       };
     } finally {
       await this.gitMutate(() => this.deps.git.deleteLocalBranch(repairBranch));
@@ -830,16 +815,35 @@ export class ValidationCoordinator {
       specSkipped: !request.issue,
       metadata: reviewMetadata(snapshot, outcome, findings),
     });
-    await this.githubMutate(() =>
-      this.deps.github.createPullRequestReview({
+    const body = [
+      "<!-- prtisan:summary -->",
+      "## Prtisan integration",
+      "",
+      managedCommentSection(current.comments, "workflow") ??
+        "<!-- prtisan:workflow:start -->\nWorkflow state will appear when apply advances this PR.\n<!-- prtisan:workflow:end -->",
+      "",
+      "<!-- prtisan:validation:start -->",
+      prepared.body,
+      "<!-- prtisan:validation:end -->",
+    ].join("\n");
+    await this.githubMutate(() => {
+      if (typeof this.deps.github.upsertPullRequestComment === "function") {
+        return this.deps.github.upsertPullRequestComment(
+          request.config.repo,
+          current.number,
+          "prtisan:summary",
+          body
+        );
+      }
+      return this.deps.github.createPullRequestReview({
         repo: request.config.repo,
         pullNumber: current.number,
         commitId: current.headRefOid,
         event: prepared.event,
-        body: prepared.body,
-        comments: prepared.comments,
-      })
-    );
+        body,
+        comments: [],
+      });
+    });
     return prepared.event;
   }
 }
@@ -1082,6 +1086,24 @@ function verificationFailureReason(result: VerificationResult): string {
   return failed
     ? `${failed.name} failed with exit code ${failed.exitCode}: ${failed.output}`
     : "Runtime verification failed.";
+}
+
+export function authorizeFindings(
+  findings: readonly ReviewFinding[]
+): readonly ReviewFinding[] {
+  return findings.map((finding) => {
+    if (
+      finding.severity !== "blocking" ||
+      (finding.rule?.trim() && finding.evidence?.trim())
+    ) {
+      return finding;
+    }
+    return {
+      ...finding,
+      severity: "advisory",
+      body: `${finding.body}\n\nPrtisan did not authorize this as a blocker because the diagnosis omitted a concrete frozen-contract rule or evidence.`,
+    };
+  });
 }
 
 function provisionalSnapshotKey(pr: PullRequest, error: unknown): string {

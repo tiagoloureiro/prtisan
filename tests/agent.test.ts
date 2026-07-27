@@ -1,18 +1,45 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, mock, test } from "bun:test";
 
 import { parseReviewReport, SandcastleCodexRunner } from "@/agent.js";
+import { BunCommandRunner, mustRun } from "@/exec.js";
 
 import { testConfig } from "./helpers.js";
 
-let lastRunInput: {
+interface SandcastleRunInput {
+  readonly cwd?: string;
+  readonly branchStrategy?: {
+    readonly branch?: string;
+  };
   readonly sandbox?: { readonly env?: Record<string, string> };
   readonly agent?: {
     readonly options?: { readonly env?: Record<string, string> };
   };
-};
+}
+
+interface SandcastleRunResult {
+  readonly branch: string;
+  readonly commits: { readonly sha: string }[];
+  readonly stdout: string;
+  readonly output: unknown;
+  readonly logFilePath: string;
+  readonly iterations: [];
+}
+
+const defaultSandcastleRun = async (): Promise<SandcastleRunResult> => ({
+  branch: "branch-1",
+  commits: [],
+  stdout: "",
+  output: { summary: "", findings: [] },
+  logFilePath: "/tmp/agent.log",
+  iterations: [],
+});
+
+let lastRunInput: SandcastleRunInput;
+let sandcastleRun: (input: SandcastleRunInput) => Promise<SandcastleRunResult> =
+  defaultSandcastleRun;
 
 mock.module("@ai-hero/sandcastle", () => ({
   Output: {
@@ -23,7 +50,7 @@ mock.module("@ai-hero/sandcastle", () => ({
     model,
     options,
   }),
-  run: async (input: typeof lastRunInput) => {
+  run: async (input: SandcastleRunInput) => {
     lastRunInput = input;
     const sandboxEnv = input.sandbox?.env ?? {};
     const agentEnv = input.agent?.options?.env ?? {};
@@ -36,14 +63,7 @@ mock.module("@ai-hero/sandcastle", () => ({
       );
     }
 
-    return {
-      branch: "branch-1",
-      commits: [],
-      stdout: "",
-      output: { summary: "", findings: [] },
-      logFilePath: "/tmp/agent.log",
-      iterations: [],
-    };
+    return sandcastleRun(input);
   },
 }));
 
@@ -102,8 +122,73 @@ describe("SandcastleCodexRunner", () => {
     });
 
     expect(lastRunInput.agent?.options?.env).toEqual({
-      CODEX_HOME: "/home/agent/.codex-agent-train",
+      CODEX_HOME: "/home/agent/.codex-prtisan",
     });
     expect(lastRunInput.sandbox?.env).toBeUndefined();
+  });
+
+  test("recovers commits created before a structured-output retry", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-train-commit-test-"));
+    const commandRunner = new BunCommandRunner();
+    await mustRun(commandRunner, "git", ["init", "--initial-branch=main"], {
+      cwd,
+    });
+    await mustRun(commandRunner, "git", ["config", "user.name", "Test User"], {
+      cwd,
+    });
+    await mustRun(
+      commandRunner,
+      "git",
+      ["config", "user.email", "test@example.com"],
+      { cwd }
+    );
+    await writeFile(join(cwd, "file.txt"), "base\n");
+    await mustRun(commandRunner, "git", ["add", "file.txt"], { cwd });
+    await mustRun(commandRunner, "git", ["commit", "-m", "base"], { cwd });
+    await mustRun(commandRunner, "git", ["branch", "repair-1"], { cwd });
+
+    let repairCommit = "";
+    sandcastleRun = async () => {
+      await mustRun(commandRunner, "git", ["switch", "repair-1"], { cwd });
+      await writeFile(join(cwd, "file.txt"), "repaired\n");
+      await mustRun(commandRunner, "git", ["add", "file.txt"], { cwd });
+      await mustRun(commandRunner, "git", ["commit", "-m", "repair"], {
+        cwd,
+      });
+      repairCommit = (
+        await mustRun(commandRunner, "git", ["rev-parse", "HEAD"], { cwd })
+      ).stdout.trim();
+      return {
+        branch: "repair-1",
+        commits: [],
+        stdout: "",
+        output: {
+          addressedFindingIds: [],
+          changedPaths: ["file.txt"],
+          summary: "Repaired.",
+          limitations: [],
+        },
+        logFilePath: "/tmp/agent.log",
+        iterations: [],
+      };
+    };
+
+    try {
+      const outcome = await new SandcastleCodexRunner(commandRunner).repair({
+        kind: "pull-request",
+        cwd,
+        config: testConfig(),
+        runId: "test",
+        relatedIssues: [],
+        prNumber: 1,
+        branch: "repair-1",
+        baseBranch: "main",
+        findings: [],
+      });
+
+      expect(outcome.commits).toEqual([repairCommit]);
+    } finally {
+      sandcastleRun = defaultSandcastleRun;
+    }
   });
 });

@@ -20,6 +20,7 @@ import type {
   VerificationResult,
 } from "@/types.js";
 import {
+  authorizeFindings,
   ValidationCoordinator,
   type ValidationRequest,
 } from "@/validation-coordinator.js";
@@ -47,6 +48,19 @@ const specFinding: ReviewFinding = {
 };
 
 describe("ValidationCoordinator", () => {
+  test("downgrades subjective blockers without contract mapping and evidence", () => {
+    const [finding] = authorizeFindings([
+      {
+        axis: "spec",
+        severity: "blocking",
+        title: "Maybe simplify",
+        body: "A different shape may be nicer.",
+      },
+    ]);
+
+    expect(finding?.severity).toBe("advisory");
+  });
+
   test("fails preflight without consuming an agent call or publishing", async () => {
     const pr = pullRequest({ number: 117 });
     const agentCalls: string[] = [];
@@ -110,16 +124,18 @@ describe("ValidationCoordinator", () => {
           axis,
           summary: "",
           findings:
-            axis === "standards"
-              ? [
-                  standardsFinding,
-                  {
-                    ...standardsFinding,
-                    severity: "blocking",
-                    evidence: "second observation",
-                  },
-                ]
-              : [specFinding],
+            input.kind === "pull-request" && input.headRefOid === "repair-sha"
+              ? []
+              : axis === "standards"
+                ? [
+                    standardsFinding,
+                    {
+                      ...standardsFinding,
+                      severity: "blocking",
+                      evidence: "second observation",
+                    },
+                  ]
+                : [specFinding],
           promptChars: 1_000,
         };
       },
@@ -169,12 +185,14 @@ describe("ValidationCoordinator", () => {
     const result = await coordinator.validate(request(original, primaryIssue));
 
     expect(result.outcome.kind).toBe("repaired");
-    expect(result.outcome.metrics.agentRuns).toBe(4);
+    expect(result.outcome.metrics.agentRuns).toBe(2);
     expect(agentCalls).toEqual([
       "review:standards",
       "review:spec",
       "repair",
       "targeted-verifier",
+      "review:standards",
+      "review:spec",
     ]);
     expect(repairedFindings).toHaveLength(2);
     expect(
@@ -187,7 +205,7 @@ describe("ValidationCoordinator", () => {
         )
         .every((input) => input.diff === "")
     ).toBe(true);
-    expect(gitCalls).toContain("push:branch-117:repair-sha:head-117");
+    expect(gitCalls).toContain("push-additive:branch-117:repair-sha:head-117");
     expect(gitCalls.some((call) => call.startsWith("delete:"))).toBe(true);
     expect(reviews).toHaveLength(1);
     expect(reviews[0]?.commitId).toBe("repair-sha");
@@ -379,14 +397,17 @@ describe("ValidationCoordinator", () => {
       getPullRequest: async () => (pushed ? repaired : original),
     } as unknown as GitHubClient;
     const agent: AgentRunner = {
-      review: async () => {
+      review: async (input) => {
         calls.push("review");
         reviewStarted?.();
         await reviewGate;
         return {
           axis: "standards",
           summary: "",
-          findings: [specFinding],
+          findings:
+            input.kind === "pull-request" && input.headRefOid === "repair-sha"
+              ? []
+              : [specFinding],
         };
       },
       repair: async (input) => {
@@ -441,7 +462,91 @@ describe("ValidationCoordinator", () => {
 
     expect(reported.outcome.kind).toBe("blocked");
     expect(repairedResult.outcome.kind).toBe("repaired");
-    expect(calls).toEqual(["review", "repair", "targeted-verifier"]);
+    expect(calls).toEqual(["review", "repair", "targeted-verifier", "review"]);
+  });
+
+  test("runs bounded repair rounds with a full review after every push", async () => {
+    let current = pullRequest({
+      number: 117,
+      headRefName: "branch-117",
+      headRefOid: "head-117",
+    });
+    const calls: string[] = [];
+    const pushed: string[] = [];
+    const github = {
+      ...githubClient(current),
+      getPullRequest: async () => current,
+    } as unknown as GitHubClient;
+    const agent: AgentRunner = {
+      review: async (input) => {
+        const head =
+          input.kind === "pull-request" ? input.headRefOid : "target-branch";
+        calls.push(`review:${head}`);
+        return {
+          axis: "standards",
+          summary: "",
+          findings: head === "repair-2" ? [] : [specFinding],
+        };
+      },
+      repair: async (input) => {
+        const commit =
+          current.headRefOid === "head-117" ? "repair-1" : "repair-2";
+        calls.push(`repair:${commit}`);
+        return {
+          branch: input.branch,
+          commits: [commit],
+          stdout: "",
+          structuredOutput: {
+            addressedFindingIds:
+              input.kind === "pull-request"
+                ? input.findings.map((finding) => finding.findingId)
+                : [],
+            changedPaths: ["src/github.ts"],
+            summary: "",
+            limitations: [],
+          },
+        };
+      },
+      verifyRepair: async (input) => {
+        calls.push("targeted-verifier");
+        return {
+          summary: "",
+          resolvedFindingIds: input.findings.map(
+            (finding) => finding.findingId as string
+          ),
+          findings: [],
+        };
+      },
+    };
+    const baseGit = gitClient();
+    const git = {
+      ...baseGit,
+      pushAdditiveCommit: async (input: { readonly commit: string }) => {
+        pushed.push(input.commit);
+        current = { ...current, headRefOid: input.commit };
+      },
+    } as unknown as GitClient;
+    const coordinator = new ValidationCoordinator({
+      github,
+      git,
+      agent,
+      runtime: passingRuntime,
+      verification: passingVerification,
+    });
+
+    const result = await coordinator.validate(request(current));
+
+    expect(result.outcome.kind).toBe("repaired");
+    expect(pushed).toEqual(["repair-1", "repair-2"]);
+    expect(calls).toEqual([
+      "review:head-117",
+      "repair:repair-1",
+      "targeted-verifier",
+      "review:repair-1",
+      "repair:repair-2",
+      "targeted-verifier",
+      "review:repair-2",
+    ]);
   });
 
   test("converts malformed structured agent output into needs_human", async () => {
@@ -605,6 +710,16 @@ function gitClient(calls: string[] = [], onPush?: () => void): GitClient {
     }) => {
       calls.push(
         `push:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
+      );
+      onPush?.();
+    },
+    pushAdditiveCommit: async (input: {
+      readonly branch: string;
+      readonly commit: string;
+      readonly expectedRemoteSha: string;
+    }) => {
+      calls.push(
+        `push-additive:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
       );
       onPush?.();
     },

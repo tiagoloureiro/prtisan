@@ -7,8 +7,8 @@ import type { AgentTrainConfig } from "./types.js";
 const ReasoningSchema = z.enum(["low", "medium", "high", "xhigh"]);
 const SessionPolicySchema = z.enum(["none", "failures", "all"]);
 const DEFAULT_MODELS = {
-  repair: "gpt-5.6-terra",
-  review: "gpt-5.6-luna",
+  repair: "gpt-5.6-sol",
+  review: "gpt-5.6-sol",
 };
 const DEFAULT_REASONING = {
   repair: "medium",
@@ -19,8 +19,11 @@ const DEFAULT_CONCURRENCY = {
   github: 4,
 };
 const DEFAULT_DOCKER = {
-  imageName: "sandcastle:agent-train",
-  codexHome: ".sandcastle/codex-home",
+  imageName: "prtisan:repository",
+  imagePolicy: "managed",
+  dockerfile: ".prtisan/Dockerfile",
+  context: ".",
+  codexHome: "prtisan://codex-home",
   cpus: 2,
   mounts: [],
 } satisfies AgentTrainConfig["docker"];
@@ -31,12 +34,14 @@ const DEFAULT_RUNTIME = {
   verification: [],
 } satisfies AgentTrainConfig["runtime"];
 const DEFAULT_VALIDATION = {
-  maxRepairRounds: 1,
+  maxRepairRounds: 3,
   maxAgentRunsPerHead: 4,
   maxWallTimeMs: 30 * 60 * 1000,
   promptCharBudget: 32_000,
   maxCheckLogChars: 8_000,
   maxCheckEvidenceChars: 16_000,
+  checkStartTimeoutMs: 2 * 60 * 1000,
+  checkCompletionTimeoutMs: 15 * 60 * 1000,
   leaseTtlMs: 2 * 60 * 60 * 1000,
   cacheTtlDays: 14,
 } satisfies AgentTrainConfig["validation"];
@@ -95,6 +100,11 @@ const ConfigSchema = z.object({
   docker: z
     .object({
       imageName: z.string().min(1).default(DEFAULT_DOCKER.imageName),
+      imagePolicy: z
+        .enum(["managed", "external"])
+        .default(DEFAULT_DOCKER.imagePolicy),
+      dockerfile: z.string().min(1).default(DEFAULT_DOCKER.dockerfile),
+      context: z.string().min(1).default(DEFAULT_DOCKER.context),
       codexHome: z.string().min(1).default(DEFAULT_DOCKER.codexHome),
       cpus: z.number().positive().optional(),
       mounts: z
@@ -157,6 +167,18 @@ const ConfigSchema = z.object({
         .positive()
         .max(DEFAULT_VALIDATION.maxCheckEvidenceChars)
         .default(DEFAULT_VALIDATION.maxCheckEvidenceChars),
+      checkStartTimeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.checkStartTimeoutMs)
+        .default(DEFAULT_VALIDATION.checkStartTimeoutMs),
+      checkCompletionTimeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .max(DEFAULT_VALIDATION.checkCompletionTimeoutMs)
+        .default(DEFAULT_VALIDATION.checkCompletionTimeoutMs),
       leaseTtlMs: z
         .number()
         .int()
@@ -201,7 +223,7 @@ const ConfigSchema = z.object({
     }),
 });
 
-export const DEFAULT_CONFIG_PATH = ".sandcastle/agent-train.config.json";
+export const DEFAULT_CONFIG_PATH = ".prtisan/legacy-config.json";
 
 export interface ConfigOverrides {
   readonly repo?: string;
@@ -246,7 +268,7 @@ export async function loadConfig(
       : undefined;
 
   if (!rawConfig) {
-    throw new Error(`Missing agent train config at ${resolvedPath}`);
+    throw new Error(`Missing legacy Prtisan config at ${resolvedPath}`);
   }
 
   const parsed = ConfigSchema.parse({
@@ -254,9 +276,7 @@ export async function loadConfig(
     ...definedOverrides(overrides),
   });
   if (parsed.repo === "OWNER/REPO") {
-    throw new Error(
-      `Configure "repo" in ${resolvedPath} or pass --repo OWNER/REPO before running agent-train.`
-    );
+    throw new Error(`Configure "repo" in ${resolvedPath}.`);
   }
 
   return parsed;

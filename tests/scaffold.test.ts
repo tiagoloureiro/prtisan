@@ -1,11 +1,29 @@
-import { describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
+import { afterEach, describe, expect, test } from "bun:test";
 
-import { readText } from "@/fs.js";
+import { readJson, readText, writeText } from "@/fs.js";
+import type { PrtisanManifest } from "@/manifest.js";
 import { writeScaffoldFiles } from "@/scaffold.js";
 
-describe("scaffold", () => {
-  test("writes required agent train files", async () => {
-    const root = `/tmp/agent-train-scaffold-${crypto.randomUUID()}`;
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+
+describe("Prtisan setup scaffold", () => {
+  test("writes the tracked manifest and Sandcastle Dockerfile", async () => {
+    const root = `/tmp/prtisan-scaffold-${crypto.randomUUID()}`;
+    roots.push(root);
+    await writeText(
+      `${root}/package.json`,
+      JSON.stringify({
+        packageManager: "pnpm@10.0.0",
+        scripts: { check: "biome check .", test: "bun test" },
+      })
+    );
 
     const result = await writeScaffoldFiles(root, {
       repo: "o/r",
@@ -13,50 +31,45 @@ describe("scaffold", () => {
     });
 
     expect(result.files.map((file) => [file.path, file.status])).toEqual([
-      [".sandcastle/agent-train.config.json", "created"],
-      [".sandcastle/Dockerfile", "created"],
-      [".gitignore", "created"],
+      [".prtisan/manifest.json", "created"],
+      [".prtisan/Dockerfile", "created"],
     ]);
-    const config = await readText(
-      `${root}/.sandcastle/agent-train.config.json`
+    const manifest = await readJson<PrtisanManifest>(
+      `${root}/.prtisan/manifest.json`
     );
-    expect(config).toContain('"repo": "o/r"');
-    const dockerfile = await readText(`${root}/.sandcastle/Dockerfile`);
-    expect(dockerfile).toContain("FROM oven/bun:");
-    expect(dockerfile).toContain("ARG AGENT_UID=1000");
-    expect(dockerfile).toContain("ARG AGENT_GID=1000");
-    expect(dockerfile).toContain("ENV HOME=/home/agent");
-    expect(dockerfile).toContain('CMD ["sleep", "infinity"]');
-    expect(await readText(`${root}/.gitignore`)).toContain(
-      ".sandcastle/codex-home/"
+    expect(manifest).toMatchObject({
+      schemaVersion: 1,
+      targetBranch: "main",
+      sandbox: {
+        provider: "docker",
+        dockerfile: ".prtisan/Dockerfile",
+      },
+      verification: {
+        bootstrap: { command: "pnpm install --frozen-lockfile" },
+      },
+    });
+    expect(
+      manifest.verification.commands.map(
+        (value: { command: string }) => value.command
+      )
+    ).toEqual(["pnpm check", "pnpm test"]);
+    expect(await readText(`${root}/.prtisan/Dockerfile`)).toContain(
+      "CODEX_HOME=/home/agent/.codex-prtisan"
     );
   });
 
-  test("skips existing managed files unless force is set", async () => {
-    const root = `/tmp/agent-train-scaffold-${crypto.randomUUID()}`;
-    await writeScaffoldFiles(root, {
-      repo: "o/r",
-      targetBranch: "main",
-    });
-    await Bun.write(`${root}/.sandcastle/Dockerfile`, "custom\n");
-
+  test("does not overwrite an existing manifest without force", async () => {
+    const root = `/tmp/prtisan-scaffold-${crypto.randomUUID()}`;
+    roots.push(root);
+    await writeText(`${root}/.prtisan/manifest.json`, "custom\n");
     const skipped = await writeScaffoldFiles(root, {
       repo: "o/r",
       targetBranch: "main",
     });
     expect(
-      skipped.files.find((file) => file.path === ".sandcastle/Dockerfile")
+      skipped.files.find((file) => file.path === ".prtisan/manifest.json")
         ?.status
     ).toBe("skipped");
-
-    const forced = await writeScaffoldFiles(root, {
-      repo: "o/r",
-      targetBranch: "main",
-      force: true,
-    });
-    expect(
-      forced.files.find((file) => file.path === ".sandcastle/Dockerfile")
-        ?.status
-    ).toBe("updated");
+    expect(await readText(`${root}/.prtisan/manifest.json`)).toBe("custom\n");
   });
 });

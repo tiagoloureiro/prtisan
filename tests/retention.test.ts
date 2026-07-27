@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { BunCommandRunner } from "@/exec.js";
+import { prtisanRepositoryDataPath } from "@/prtisan-paths.js";
 import { pruneRuntimeArtifacts } from "@/retention.js";
 
 import { testConfig } from "./helpers.js";
@@ -30,7 +31,7 @@ describe("runtime retention", () => {
   test("keeps the newest bounded runs and preserves only oversized log tails", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "prtisan-retention-test-"));
     temporaryDirectories.push(cwd);
-    const runsRoot = join(cwd, ".sandcastle", "runs");
+    const runsRoot = prtisanRepositoryDataPath(cwd, "runs");
     const now = Date.now();
     for (const [index, run] of ["run-1", "run-2", "run-3"].entries()) {
       const logs = join(runsRoot, run, "logs");

@@ -1,5 +1,6 @@
 import type { CommandRunner } from "./exec.js";
 import { mustRun } from "./exec.js";
+import type { PrtisanManifest } from "./manifest.js";
 import { joinPath } from "./path.js";
 import { type ScaffoldResult, writeScaffoldFiles } from "./scaffold.js";
 
@@ -10,6 +11,7 @@ export interface SetupWorktreeInput {
   readonly branch: string;
   readonly remote: string;
   readonly force?: boolean;
+  readonly manifest?: PrtisanManifest;
 }
 
 export interface SetupWorktreeResult {
@@ -21,7 +23,7 @@ export async function createSetupBranchChange(
   input: SetupWorktreeInput,
   runner: CommandRunner
 ): Promise<SetupWorktreeResult> {
-  const tempRoot = joinPath("/tmp", `agent-train-init-${crypto.randomUUID()}`);
+  const tempRoot = joinPath("/tmp", `prtisan-init-${crypto.randomUUID()}`);
   const branchExists = await remoteBranchExists(
     runner,
     input.root,
@@ -52,6 +54,7 @@ export async function createSetupBranchChange(
       repo: input.repo,
       targetBranch: input.targetBranch,
       force: input.force,
+      manifest: input.manifest,
     });
     const changed = await hasGitChanges(runner, tempRoot);
 
@@ -59,22 +62,12 @@ export async function createSetupBranchChange(
       await mustRun(
         runner,
         "git",
-        [
-          "add",
-          ".sandcastle/agent-train.config.json",
-          ".sandcastle/Dockerfile",
-          ".gitignore",
-        ],
+        ["add", ".prtisan/manifest.json", ".prtisan/Dockerfile"],
         { cwd: tempRoot }
       );
-      await mustRun(
-        runner,
-        "git",
-        ["commit", "-m", "Configure Agent PR Train"],
-        {
-          cwd: tempRoot,
-        }
-      );
+      await mustRun(runner, "git", ["commit", "-m", "Configure Prtisan"], {
+        cwd: tempRoot,
+      });
       await mustRun(
         runner,
         "git",

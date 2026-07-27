@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 
 import { ensureDir } from "./fs.js";
 import { joinPath } from "./path.js";
+import { prtisanRepositoryStatePath } from "./prtisan-paths.js";
 import { stableDigest } from "./validation-hardening.js";
 
 interface LeaseOwner {
@@ -18,7 +19,8 @@ export interface ValidationLease {
 export class ValidationLeaseManager {
   constructor(
     private readonly cwd: string,
-    private readonly ttlMs: number
+    private readonly ttlMs: number,
+    private readonly storageRoot?: string
   ) {}
 
   async acquire(
@@ -26,13 +28,10 @@ export class ValidationLeaseManager {
     options: { readonly waitMs: number }
   ): Promise<ValidationLease> {
     const startedAt = Date.now();
-    const lockPath = joinPath(
-      this.cwd,
-      ".sandcastle",
-      "locks",
-      stableDigest(key)
-    );
-    await ensureDir(joinPath(this.cwd, ".sandcastle", "locks"));
+    const directory =
+      this.storageRoot ?? prtisanRepositoryStatePath(this.cwd, "locks");
+    const lockPath = joinPath(directory, stableDigest(key));
+    await ensureDir(directory);
 
     while (true) {
       const token = crypto.randomUUID();

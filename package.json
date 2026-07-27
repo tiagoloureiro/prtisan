@@ -1,5 +1,5 @@
 {
-  "name": "agent-train",
+  "name": "prtisan",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,18 +9,16 @@
     "README.md"
   ],
   "bin": {
-    "agent-train": "./dist/index.js"
+    "prtisan": "./dist/index.js"
   },
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external && chmod +x dist/index.js && mkdir -p dist/vendor && cp -R src/vendor/code-review dist/vendor/",
     "dev": "bun run src/index.ts",
-    "agent-train": "bun run src/index.ts",
+    "prtisan": "bun run src/index.ts",
     "link-bin": "bun run build && bun link --global",
     "release:pack": "mkdir -p release && rm -f release/*.tgz release/SHA256SUMS && bun run build && bun pm pack --destination release && sha256sum release/*.tgz > release/SHA256SUMS",
     "init": "bun run src/index.ts init",
-    "validate": "bun run src/index.ts validate",
-    "merge": "bun run src/index.ts merge",
-    "tui": "bun run src/index.ts tui",
+    "plan": "bun run src/index.ts plan",
     "lint": "eslint .",
     "format": "prettier --ignore-unknown --write .",
     "format:check": "prettier --ignore-unknown --check .",
@@ -29,15 +27,12 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@ai-hero/sandcastle": "^0.12.0",
-    "ink": "^7.1.1",
-    "react": "^19.2.0",
+    "@ai-hero/sandcastle": "0.12.0",
     "zod": "^4.1.13"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.2.22",
-    "@types/react": "^19.2.0",
     "bun": "1.2.22",
     "eslint": "^10.7.0",
     "eslint-plugin-simple-import-sort": "^14.0.0",

@@ -46,6 +46,15 @@ export interface MergeStateRepairPromptInput {
   readonly mergeState: string;
 }
 
+export interface RestackConflictRepairPromptInput {
+  readonly prNumber: number;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly parentContract: string;
+  readonly childContract: string;
+  readonly uniqueDiff: string;
+}
+
 export interface IssueBranchReviewPromptInput {
   readonly issue: Issue;
   readonly relatedIssues: readonly Issue[];
@@ -123,7 +132,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     "",
     input.issue
       ? issueBlock("Primary issue", input.issue)
-      : "Primary issue: none linked. For this PR, run Standards only; Spec is skipped by agent-train.",
+      : "Primary issue: none linked. For this PR, run repository policy only; contract review is unavailable.",
     relatedIssuesSummary(input.relatedIssues),
     "",
     `Changed files: ${(input.changedFiles ?? []).join(", ") || "(inspect the diff)"}.`,
@@ -179,7 +188,7 @@ export function buildRepairPrompt(input: RepairPromptInput): string {
     "Fix only clear blocking validation findings listed below.",
     "Do not address advisory findings unless they are trivial and directly adjacent to a blocking fix.",
     "Commit the repair to the current branch. Prtisan will independently run the authoritative verification commands.",
-    "Return JSON between <repair> and </repair> with addressedFindingIds, changedPaths, summary, and limitations.",
+    repairOutputInstruction(),
     "When finished, output <promise>COMPLETE</promise>.",
     "",
     input.issue
@@ -204,8 +213,10 @@ export function buildCiRepairPrompt(input: CiRepairPromptInput): string {
     "Use the failed check evidence below as the primary diagnosis input.",
     "Fix only clear causes of the failing checks.",
     "Do not make product scope changes unless they are required by the failing checks or the linked issue.",
+    "Never make a check pass by skipping, disabling, neutralizing, or ignoring the failing verification. Missing runner tools or services are infrastructure failures, not permission to weaken a gate.",
+    "GitHub Actions commands must be fully non-interactive. Never rely on password-prompting sudo; either use pre-provisioned runner capabilities, a verified passwordless sudo path, or fail with a clear infrastructure limitation.",
     "Commit the repair to the current branch. Prtisan will independently run the authoritative verification commands.",
-    "Return JSON between <repair> and </repair> with addressedFindingIds, changedPaths, summary, and limitations.",
+    repairOutputInstruction(),
     "When finished, output <promise>COMPLETE</promise>.",
     "",
     input.issue
@@ -228,7 +239,7 @@ export function buildMergeStateRepairPrompt(
     "Fix only concrete mergeability blockers listed below.",
     "Do not attempt to satisfy required human review with code changes.",
     "Commit the repair to the current branch. Prtisan will independently run the authoritative verification commands.",
-    "Return JSON between <repair> and </repair> with addressedFindingIds, changedPaths, summary, and limitations.",
+    repairOutputInstruction(),
     "When finished, output <promise>COMPLETE</promise>.",
     "",
     input.issue
@@ -238,6 +249,31 @@ export function buildMergeStateRepairPrompt(
     "",
     "Mergeability blockers:",
     JSON.stringify(input.blockers, null, 2),
+  ].join("\n");
+}
+
+export function buildRestackConflictRepairPrompt(
+  input: RestackConflictRepairPromptInput
+): string {
+  return [
+    `Reconstruct PR #${input.prNumber} on ${input.baseBranch} after its parent was squash-merged.`,
+    `Commit the resolved child change to ${input.branch}.`,
+    "",
+    "Use only the frozen parent and child contracts and the child's former unique diff.",
+    "Preserve the parent result, implement only child-owned intent, and do not broaden scope.",
+    "If the contracts do not determine a safe resolution, make no commit and report the ambiguity in limitations.",
+    "Prtisan will independently verify the candidate and re-review its changed snapshot.",
+    repairOutputInstruction(),
+    "When finished, output <promise>COMPLETE</promise>.",
+    "",
+    "Frozen parent contract:",
+    input.parentContract,
+    "",
+    "Frozen child contract:",
+    input.childContract,
+    "",
+    "Former child-unique diff:",
+    input.uniqueDiff,
   ].join("\n");
 }
 
@@ -251,7 +287,7 @@ export function buildIssueBranchRepairPrompt(
     "Fix only clear blocking validation findings listed below.",
     "Do not address advisory findings unless they are trivial and directly adjacent to a blocking fix.",
     "Commit the repair to the current branch. Prtisan will independently run the authoritative verification commands.",
-    "Return JSON between <repair> and </repair> with addressedFindingIds, changedPaths, summary, and limitations.",
+    repairOutputInstruction(),
     "When finished, output <promise>COMPLETE</promise>.",
     "",
     issueBlock("Primary issue", input.issue),
@@ -263,6 +299,23 @@ export function buildIssueBranchRepairPrompt(
       null,
       2
     ),
+  ].join("\n");
+}
+
+function repairOutputInstruction(): string {
+  return [
+    "Return JSON between <repair> and </repair> with exactly this shape:",
+    JSON.stringify(
+      {
+        addressedFindingIds: ["finding id"],
+        changedPaths: ["path/to/changed-file"],
+        summary: "one short summary",
+        limitations: ["verification limitation, if any"],
+      },
+      null,
+      2
+    ),
+    "All four fields are required and limitations must always be an array of strings.",
   ].join("\n");
 }
 

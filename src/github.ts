@@ -42,6 +42,7 @@ const PR_JSON_FIELDS = [
   "closingIssuesReferences",
   "latestReviews",
   "reviews",
+  "comments",
   "statusCheckRollup",
 ].join(",");
 
@@ -83,6 +84,13 @@ export interface PullRequestCheckStatus {
   readonly failed: readonly PullRequestCheck[];
   readonly pending: readonly PullRequestCheck[];
   readonly successful: readonly PullRequestCheck[];
+}
+
+export interface CheckWaitOptions {
+  readonly headRefOid: string;
+  readonly expectedCheckNames?: readonly string[];
+  readonly startGraceMs?: number;
+  readonly startTimeoutMs?: number;
 }
 
 const CHECK_LOG_EXCERPT_CHARS = 30_000;
@@ -209,7 +217,7 @@ export class GitHubClient {
   }
 
   async createIssue(input: CreateIssueInput): Promise<GitHubIssueSummary> {
-    const bodyFile = `/tmp/agent-train-setup-issue-${crypto.randomUUID()}.md`;
+    const bodyFile = `/tmp/prtisan-setup-issue-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, input.body);
     try {
       const result = await mustRun(
@@ -272,6 +280,57 @@ export class GitHubClient {
     body: string
   ): Promise<void> {
     await this.createIssueComment(repo, pullNumber, body);
+  }
+
+  async upsertPullRequestComment(
+    repo: string,
+    pullNumber: number,
+    marker: string,
+    body: string
+  ): Promise<void> {
+    const comments = await runJson<unknown[]>(
+      this.runner,
+      "gh",
+      [
+        "api",
+        "--paginate",
+        `/repos/${repo}/issues/${pullNumber}/comments?per_page=100`,
+      ],
+      { cwd: this.cwd }
+    );
+    const existing = comments
+      .map((value) =>
+        typeof value === "object" && value !== null
+          ? (value as { id?: unknown; body?: unknown })
+          : {}
+      )
+      .find(
+        (value) =>
+          typeof value.id === "number" &&
+          typeof value.body === "string" &&
+          value.body.includes(`<!-- ${marker} -->`)
+      );
+    const safeBody = sanitizeGitHubText(body);
+    if (typeof existing?.id === "number") {
+      await mustRun(
+        this.runner,
+        "gh",
+        [
+          "api",
+          "--method",
+          "PATCH",
+          `/repos/${repo}/issues/comments/${existing.id}`,
+          "--input",
+          "-",
+        ],
+        {
+          cwd: this.cwd,
+          input: JSON.stringify({ body: safeBody }),
+        }
+      );
+      return;
+    }
+    await this.createIssueComment(repo, pullNumber, safeBody);
   }
 
   async getPullRequestByBranch(
@@ -348,7 +407,7 @@ export class GitHubClient {
       input.headBranch,
       "open"
     );
-    const bodyFile = `/tmp/agent-train-pr-${crypto.randomUUID()}.md`;
+    const bodyFile = `/tmp/prtisan-pr-${crypto.randomUUID()}.md`;
     await writeText(bodyFile, input.body);
 
     try {
@@ -592,12 +651,63 @@ export class GitHubClient {
     repo: string,
     pullNumber: number,
     timeoutMs = 15 * 60 * 1000,
-    intervalMs = 15_000
+    intervalMs = 15_000,
+    options?: CheckWaitOptions
   ): Promise<PullRequest> {
     const startedAt = Date.now();
+    const expectedNames = new Set(
+      (options?.expectedCheckNames ?? []).map(normalizeCheckName)
+    );
 
     while (Date.now() - startedAt < timeoutMs) {
       const pr = await this.getPullRequest(repo, pullNumber);
+      if (options && !headMatches(pr.headRefOid, options.headRefOid)) {
+        await Bun.sleep(intervalMs);
+        continue;
+      }
+      if (options) {
+        const exactChecks = await this.getCommitChecks(
+          repo,
+          options.headRefOid
+        );
+        const observedNames = new Set(
+          exactChecks.map((check) => normalizeCheckName(check.name))
+        );
+        const expectedStarted = [...expectedNames].every((name) =>
+          observedNames.has(name)
+        );
+        const graceElapsed =
+          Date.now() - startedAt >= (options.startGraceMs ?? 30_000);
+        if (
+          (expectedNames.size > 0 && !expectedStarted) ||
+          (expectedNames.size === 0 &&
+            exactChecks.length === 0 &&
+            !graceElapsed)
+        ) {
+          if (
+            expectedNames.size > 0 &&
+            !expectedStarted &&
+            Date.now() - startedAt >= (options.startTimeoutMs ?? timeoutMs)
+          ) {
+            const missing = [...expectedNames].filter(
+              (name) => !observedNames.has(name)
+            );
+            throw new Error(
+              `Timed out waiting for required checks to start on ${options.headRefOid.slice(0, 7)}: ${missing.join(", ")}.`
+            );
+          }
+          await Bun.sleep(intervalMs);
+          continue;
+        }
+        const checks = pullRequestCheckStatus({
+          statusCheckRollup: exactChecks,
+        });
+        if (checks.pending.length === 0) {
+          return { ...pr, statusCheckRollup: exactChecks };
+        }
+        await Bun.sleep(intervalMs);
+        continue;
+      }
       const checks = pullRequestCheckStatus(pr);
       if (checks.pending.length === 0) return pr;
       await Bun.sleep(intervalMs);
@@ -606,6 +716,76 @@ export class GitHubClient {
     throw new Error(
       `Timed out waiting for PR #${pullNumber} checks to settle.`
     );
+  }
+
+  async getCommitChecks(
+    repo: string,
+    headRefOid: string
+  ): Promise<PullRequestCheck[]> {
+    const [checkRuns, statuses] = await Promise.all([
+      runJson<unknown>(
+        this.runner,
+        "gh",
+        ["api", `/repos/${repo}/commits/${headRefOid}/check-runs?per_page=100`],
+        { cwd: this.cwd }
+      ),
+      runJson<unknown>(
+        this.runner,
+        "gh",
+        ["api", `/repos/${repo}/commits/${headRefOid}/status?per_page=100`],
+        { cwd: this.cwd }
+      ),
+    ]);
+    const runRecords =
+      typeof checkRuns === "object" &&
+      checkRuns !== null &&
+      Array.isArray((checkRuns as Record<string, unknown>).check_runs)
+        ? ((checkRuns as Record<string, unknown>).check_runs as unknown[])
+        : [];
+    const statusRecords =
+      typeof statuses === "object" &&
+      statuses !== null &&
+      Array.isArray((statuses as Record<string, unknown>).statuses)
+        ? ((statuses as Record<string, unknown>).statuses as unknown[])
+        : [];
+    return [...runRecords, ...statusRecords].map(normalizePullRequestCheck);
+  }
+
+  async getRequiredCheckNames(repo: string, branch: string): Promise<string[]> {
+    const result = await this.runner.run(
+      "gh",
+      [
+        "api",
+        `/repos/${repo}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`,
+      ],
+      { cwd: this.cwd }
+    );
+    if (result.exitCode !== 0) return [];
+    try {
+      const value = JSON.parse(result.stdout) as {
+        contexts?: unknown;
+        checks?: unknown;
+      };
+      const contexts = Array.isArray(value.contexts)
+        ? value.contexts.filter(
+            (context): context is string => typeof context === "string"
+          )
+        : [];
+      const checks = Array.isArray(value.checks)
+        ? value.checks
+            .map((check) =>
+              typeof check === "object" &&
+              check !== null &&
+              typeof (check as { context?: unknown }).context === "string"
+                ? ((check as { context: string }).context as string)
+                : undefined
+            )
+            .filter((context): context is string => Boolean(context))
+        : [];
+      return [...new Set([...contexts, ...checks])];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -707,7 +887,7 @@ export function actionablePullRequestCheckEvidence(
 }
 
 function isInfrastructureEvidence(value: string): boolean {
-  return /command not found|cannot connect to the docker daemon|runner (?:is )?(?:offline|unavailable|lost)|failed to (?:start|initialize)|startup failure|no space left on device|network is unreachable|temporary failure|could not resolve host|service unavailable|rate limit(?:ed)?/i.test(
+  return /command not found|error while loading shared libraries|libatomic\.so.*cannot open shared object|sudo.*(?:password|timed out)|password is required|cannot connect to the docker daemon|docker (?:is required|is not (?:installed|available)|daemon is unavailable)|runner (?:is )?(?:offline|unavailable|lost)|failed to (?:start|initialize)|startup failure|no space left on device|network is unreachable|temporary failure|could not resolve host|service unavailable|rate limit(?:ed)?/i.test(
     value
   );
 }
@@ -751,6 +931,23 @@ export function sanitizeGitHubText(value: string): string {
   return sanitizeForGitHub(value);
 }
 
+export function managedCommentSection(
+  comments: readonly { readonly body: string }[] | undefined,
+  section: "workflow" | "validation"
+): string | undefined {
+  const start = `<!-- prtisan:${section}:start -->`;
+  const end = `<!-- prtisan:${section}:end -->`;
+  for (const comment of comments ?? []) {
+    if (!comment.body.includes("<!-- prtisan:summary -->")) continue;
+    const startAt = comment.body.indexOf(start);
+    const endAt = comment.body.indexOf(end, startAt + start.length);
+    if (startAt >= 0 && endAt >= 0) {
+      return comment.body.slice(startAt, endAt + end.length);
+    }
+  }
+  return undefined;
+}
+
 function normalizeFailureEvidence(value: string): string {
   return sanitizeEvidence(value)
     .replace(/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g, "")
@@ -767,8 +964,13 @@ function normalizePullRequestCheck(raw: unknown): PullRequestCheck {
 
   const value = raw as Record<string, unknown>;
   const detailsUrl =
-    stringValue(value.detailsUrl) ?? stringValue(value.targetUrl);
-  const workflowName = stringValue(value.workflowName);
+    stringValue(value.detailsUrl) ??
+    stringValue(value.details_url) ??
+    stringValue(value.html_url) ??
+    stringValue(value.targetUrl) ??
+    stringValue(value.target_url);
+  const workflowName =
+    stringValue(value.workflowName) ?? stringValue(value.workflow_name);
 
   return {
     name:
@@ -782,6 +984,18 @@ function normalizePullRequestCheck(raw: unknown): PullRequestCheck {
     workflowName,
     runId: detailsUrl ? actionRunId(detailsUrl) : undefined,
   };
+}
+
+function normalizeCheckName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function headMatches(actual: string, expected: string): boolean {
+  return (
+    actual === expected ||
+    actual.startsWith(expected) ||
+    expected.startsWith(actual)
+  );
 }
 
 function isFailedCheck(check: PullRequestCheck): boolean {
@@ -870,6 +1084,7 @@ function normalizePullRequest(raw: unknown): PullRequest {
     closingIssuesReferences: normalizeRefs(value.closingIssuesReferences),
     latestReviews: normalizeLatestReviews(value.latestReviews),
     reviews: normalizeLatestReviews(value.reviews),
+    comments: normalizeLatestReviews(value.comments),
   };
 }
 
@@ -885,7 +1100,9 @@ function normalizeLatestReviews(value: unknown): PullRequestReviewSummary[] {
         submittedAt:
           typeof record.submittedAt === "string"
             ? record.submittedAt
-            : undefined,
+            : typeof record.createdAt === "string"
+              ? record.createdAt
+              : undefined,
         authorLogin: normalizeAuthorLogin(record.author),
       };
     })
@@ -915,7 +1132,7 @@ function bodyOnlyReview(input: PullRequestReviewInput): PullRequestReviewInput {
     body: [
       input.body,
       "",
-      "GitHub rejected the inline review comments for this diff, so agent-train is preserving them in the review body.",
+      "GitHub rejected the inline review comments, so Prtisan is preserving them in the managed summary.",
       "",
       ...input.comments.map(
         (comment) =>

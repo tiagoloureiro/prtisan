@@ -1,8 +1,13 @@
-import { chmod } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
+import {
+  DockerBaseImageManager,
+  requireDockerImageId,
+} from "./docker-image.js";
 import type { CommandRunner } from "./exec.js";
-import { ensureDir, writeText } from "./fs.js";
+import { ensureDir } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
+import { prtisanRepositoryDataPath } from "./prtisan-paths.js";
 import { redactCredentialValues } from "./redaction.js";
 import type {
   AgentTrainConfig,
@@ -16,9 +21,11 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_VERIFICATION_OUTPUT_CHARS = 8_000;
 
 export interface ToolchainProfile {
-  readonly kind: "node" | "bun" | "image";
+  readonly kind: "node" | "bun" | "python" | "go" | "rust" | "image";
   readonly nodeVersion?: string;
-  readonly packageManager?: "pnpm" | "npm" | "yarn" | "bun";
+  readonly languageVersion?: string;
+  readonly packageManager?:
+    "pnpm" | "npm" | "yarn" | "bun" | "uv" | "go" | "cargo";
   readonly packageManagerVersion?: string;
   readonly lockfileDigest?: string;
   readonly bootstrap?: SandboxCommandConfig;
@@ -76,6 +83,50 @@ export interface VerificationRunner {
   }): Promise<VerificationResult>;
 }
 
+export class DeclaredRuntimeProvider implements RuntimeProvider {
+  constructor(private readonly baseImages: DockerBaseImageManager) {}
+
+  async prepare(input: {
+    readonly cwd: string;
+    readonly ref: string;
+    readonly config: AgentTrainConfig;
+  }): Promise<PreparedRuntime> {
+    if (
+      input.config.runtime.verificationMode !== "explicit" ||
+      input.config.runtime.verification.length === 0
+    ) {
+      throw new RuntimePreparationError(
+        "Prtisan requires repository-declared verification commands.",
+        "unsupported"
+      );
+    }
+    const image = await this.baseImages.ensure({
+      cwd: input.cwd,
+      config: input.config,
+      ref: input.ref,
+    });
+    const profileValue = {
+      kind: "image" as const,
+      bootstrap: input.config.runtime.bootstrap,
+      verification: input.config.runtime.verification,
+      probes: input.config.runtime.probes,
+      imageId: image.id,
+      ref: input.ref,
+    };
+    return {
+      imageName: image.id,
+      fingerprint: stableDigest(profileValue),
+      profile: {
+        ...profileValue,
+        fingerprint: stableDigest(profileValue),
+      },
+      bootstrap: input.config.runtime.bootstrap,
+      verification: input.config.runtime.verification,
+      probes: input.config.runtime.probes,
+    };
+  }
+}
+
 export class RuntimePreparationError extends Error {
   constructor(
     message: string,
@@ -99,6 +150,12 @@ export class ManifestToolchainResolver implements ToolchainResolver {
     const configuredVerification = input.config.runtime.verification;
 
     if (!packageJsonText) {
+      const detected = await resolveNonNodeProfile(
+        reader,
+        input.config,
+        configuredVerification
+      );
+      if (detected) return detected;
       if (
         input.config.runtime.verificationMode !== "explicit" ||
         configuredVerification.length === 0 ||
@@ -214,29 +271,42 @@ export class ManifestToolchainResolver implements ToolchainResolver {
 }
 
 export class DockerRuntimeImageBuilder implements RuntimeImageBuilder {
-  constructor(private readonly runner: CommandRunner) {}
+  constructor(
+    private readonly runner: CommandRunner,
+    private readonly baseImages = new DockerBaseImageManager(runner)
+  ) {}
 
   async ensureImage(input: {
     readonly cwd: string;
     readonly config: AgentTrainConfig;
     readonly profile: ToolchainProfile;
   }): Promise<string> {
-    if (input.profile.kind === "image" || !input.config.runtime.autoProvision) {
-      return input.config.docker.imageName;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.ensureImageOnce(input);
+      } catch (error) {
+        if (attempt === 0 && isVanishedRuntimeImageError(error)) {
+          this.baseImages.clear(input);
+          continue;
+        }
+        throw error;
+      }
     }
-    const baseInspect = await this.runner.run(
-      "docker",
-      ["image", "inspect", input.config.docker.imageName, "--format={{.Id}}"],
-      { cwd: input.cwd }
+    throw new RuntimePreparationError(
+      "Runtime image preparation exhausted its retry budget."
     );
-    const baseImageId = baseInspect.stdout.trim();
-    if (baseInspect.exitCode !== 0 || !baseImageId) {
-      throw new RuntimePreparationError(
-        `Unable to resolve base image ID for ${input.config.docker.imageName}: ${trimOutput(
-          baseInspect.stderr || baseInspect.stdout
-        )}`
-      );
+  }
+
+  private async ensureImageOnce(input: {
+    readonly cwd: string;
+    readonly config: AgentTrainConfig;
+    readonly profile: ToolchainProfile;
+  }): Promise<string> {
+    const baseImage = await this.baseImages.ensure(input);
+    if (input.profile.kind === "image" || !input.config.runtime.autoProvision) {
+      return baseImage.id;
     }
+    const baseImageId = baseImage.id;
     const toolchainImageId = await pullImmutableImage(
       this.runner,
       input.cwd,
@@ -254,8 +324,9 @@ export class DockerRuntimeImageBuilder implements RuntimeImageBuilder {
       toolchainImageId,
       toolsImageId,
       toolchain: input.profile.fingerprint,
+      dockerfile: runtimeDockerfileDigest(input.profile),
     });
-    const imageName = `agent-train/runtime:${imageDigest.slice(0, 20)}`;
+    const imageName = `prtisan/runtime:${imageDigest.slice(0, 20)}`;
     const inspect = await this.runner.run(
       "docker",
       ["image", "inspect", imageName],
@@ -263,45 +334,54 @@ export class DockerRuntimeImageBuilder implements RuntimeImageBuilder {
     );
     if (inspect.exitCode === 0) return imageName;
 
-    const runtimeDir = joinPath(
+    const runtimeDir = prtisanRepositoryDataPath(
       input.cwd,
-      ".sandcastle",
       "runtime",
       input.profile.fingerprint
     );
-    const dockerfile = joinPath(runtimeDir, "Dockerfile");
     await ensureDir(runtimeDir);
-    await writeText(dockerfile, runtimeDockerfile(input.profile));
-    await chmod(dockerfile, 0o600);
 
-    const build = await this.runner.run(
-      "docker",
-      [
-        "build",
-        "-t",
-        imageName,
-        "--build-arg",
-        `BASE_IMAGE=${baseImageId}`,
-        "--build-arg",
-        `TOOLCHAIN_IMAGE=${toolchainImageId}`,
-        "--build-arg",
-        `TOOLS_IMAGE=${toolsImageId}`,
-        "--build-arg",
-        `AGENT_UID=${runtimeUid()}`,
-        "--build-arg",
-        `AGENT_GID=${runtimeGid()}`,
-        "-f",
-        dockerfile,
-        runtimeDir,
-      ],
+    const sourceReferences = await createTemporaryImageReferences(
+      this.runner,
+      input.cwd,
       {
-        cwd: input.cwd,
-        timeoutMs: Math.min(
-          20 * 60 * 1000,
-          input.config.validation.maxWallTimeMs
-        ),
+        base: baseImageId,
+        toolchain: toolchainImageId,
+        tools: toolsImageId,
       }
     );
+    let build;
+    try {
+      build = await this.runner.run(
+        "docker",
+        [
+          "build",
+          "-t",
+          imageName,
+          "--build-arg",
+          `AGENT_UID=${runtimeUid()}`,
+          "--build-arg",
+          `AGENT_GID=${runtimeGid()}`,
+          "-f",
+          "-",
+          runtimeDir,
+        ],
+        {
+          cwd: input.cwd,
+          input: runtimeDockerfile(input.profile, sourceReferences.references),
+          timeoutMs: Math.min(
+            20 * 60 * 1000,
+            input.config.validation.maxWallTimeMs
+          ),
+        }
+      );
+    } finally {
+      await removeTemporaryImageReferences(
+        this.runner,
+        input.cwd,
+        sourceReferences.created
+      );
+    }
     if (build.exitCode !== 0) {
       throw new RuntimePreparationError(
         `Unable to build runtime image ${imageName}: ${trimOutput(
@@ -319,8 +399,10 @@ export class DockerRuntimeProvider implements RuntimeProvider {
     private readonly resolver: ToolchainResolver = new ManifestToolchainResolver(
       runner
     ),
+    baseImages: DockerBaseImageManager = new DockerBaseImageManager(runner),
     private readonly imageBuilder: RuntimeImageBuilder = new DockerRuntimeImageBuilder(
-      runner
+      runner,
+      baseImages
     ),
     private readonly now: () => number = Date.now
   ) {}
@@ -382,16 +464,15 @@ export class DockerVerificationRunner implements VerificationRunner {
     readonly extraCommands?: readonly SandboxCommandConfig[];
   }): Promise<VerificationResult> {
     const deadlineAt = this.now() + input.config.validation.maxWallTimeMs;
-    const worktreePath = joinPath(
+    const worktreePath = prtisanRepositoryDataPath(
       input.cwd,
-      ".sandcastle",
       "runs",
       input.runId,
       "worktrees",
       `verify-${safeLabel(input.label)}`
     );
     await ensureDir(
-      joinPath(input.cwd, ".sandcastle", "runs", input.runId, "worktrees")
+      prtisanRepositoryDataPath(input.cwd, "runs", input.runId, "worktrees")
     );
     await this.runner.run(
       "git",
@@ -416,6 +497,11 @@ export class DockerVerificationRunner implements VerificationRunner {
         ],
       };
     }
+    const gitCommonDir = await resolveGitCommonDirectory(
+      this.runner,
+      input.cwd,
+      worktreePath
+    );
 
     const commands: VerificationResult["commands"][number][] = [];
     try {
@@ -424,6 +510,7 @@ export class DockerVerificationRunner implements VerificationRunner {
           this.runner,
           input,
           worktreePath,
+          gitCommonDir,
           input.runtime.bootstrap,
           deadlineAt,
           this.now
@@ -463,6 +550,7 @@ export class DockerVerificationRunner implements VerificationRunner {
           this.runner,
           input,
           worktreePath,
+          gitCommonDir,
           item,
           deadlineAt,
           this.now
@@ -635,6 +723,219 @@ async function discoveredLockfiles(reader: GitSnapshotReader): Promise<
   return found;
 }
 
+async function resolveNonNodeProfile(
+  reader: GitSnapshotReader,
+  config: AgentTrainConfig,
+  configuredVerification: readonly SandboxCommandConfig[]
+): Promise<ToolchainProfile | undefined> {
+  const [
+    pyproject,
+    uvLock,
+    pythonVersion,
+    goMod,
+    cargoToml,
+    cargoLock,
+    rustToolchain,
+  ] = await Promise.all([
+    reader.read("pyproject.toml"),
+    reader.read("uv.lock"),
+    reader.read(".python-version"),
+    reader.read("go.mod"),
+    reader.read("Cargo.toml"),
+    reader.read("Cargo.lock"),
+    reader
+      .read("rust-toolchain.toml")
+      .then((value) => value ?? reader.read("rust-toolchain")),
+  ]);
+  const detected = [
+    pyproject && uvLock ? "python" : undefined,
+    goMod ? "go" : undefined,
+    cargoToml && cargoLock ? "rust" : undefined,
+  ].filter(Boolean);
+  if (detected.length > 1) {
+    throw new RuntimePreparationError(
+      `Detected a polyglot repository (${detected.join(", ")}). Configure runtime verification and probes explicitly for the composed image.`,
+      "unsupported"
+    );
+  }
+
+  if (pyproject && uvLock) {
+    const version =
+      exactLanguageVersion(pythonVersion) ??
+      pyproject.match(/requires-python\s*=\s*["']==(\d+\.\d+\.\d+)["']/)?.[1];
+    if (!version) {
+      throw new RuntimePreparationError(
+        "A Python/uv project must pin an exact version in .python-version or pyproject.toml requires-python.",
+        "unsupported"
+      );
+    }
+    const automatic = [
+      ...(pyproject.includes("ruff")
+        ? [command("Ruff", "uv run ruff check .")]
+        : []),
+      ...(pyproject.includes("pytest")
+        ? [command("Pytest", "uv run pytest")]
+        : []),
+    ];
+    const verification = configuredOrAutomaticVerification(
+      config,
+      configuredVerification,
+      automatic,
+      "Python"
+    );
+    return languageProfile({
+      kind: "python",
+      version,
+      manager: "uv",
+      managerVersion: "0.8.13",
+      lockfile: uvLock,
+      bootstrap: command(
+        "Install Python dependencies from uv.lock",
+        `UV_CACHE_DIR=${packageManagerCachePath("uv")} uv sync --frozen`
+      ),
+      verification,
+      probes: [
+        exactVersionProbe(
+          "Python",
+          "python --version 2>&1",
+          `Python ${version}`
+        ),
+        exactVersionProbe("uv", "uv --version", "uv 0.8.13"),
+        command("ripgrep", "rg --version", 30_000),
+        ...config.runtime.probes,
+      ],
+    });
+  }
+
+  if (goMod) {
+    const version = goMod.match(/^go\s+(\d+\.\d+(?:\.\d+)?)\s*$/m)?.[1];
+    if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
+      throw new RuntimePreparationError(
+        "go.mod must pin an exact three-part Go version.",
+        "unsupported"
+      );
+    }
+    const verification = configuredOrAutomaticVerification(
+      config,
+      configuredVerification,
+      [command("Go vet", "go vet ./..."), command("Go tests", "go test ./...")],
+      "Go"
+    );
+    return languageProfile({
+      kind: "go",
+      version,
+      manager: "go",
+      lockfile: goMod,
+      bootstrap: command(
+        "Download Go modules",
+        `GOMODCACHE=${packageManagerCachePath("go")} go mod download`
+      ),
+      verification,
+      probes: [
+        exactVersionProbe(
+          "Go",
+          "go version | awk '{print $3}'",
+          `go${version}`
+        ),
+        command("ripgrep", "rg --version", 30_000),
+        ...config.runtime.probes,
+      ],
+    });
+  }
+
+  if (cargoToml && cargoLock) {
+    const version = rustToolchain?.match(
+      /(?:channel\s*=\s*["']|^)(\d+\.\d+\.\d+)(?:["']|\s*$)/m
+    )?.[1];
+    if (!version) {
+      throw new RuntimePreparationError(
+        "A Rust project must pin an exact toolchain in rust-toolchain.toml or rust-toolchain.",
+        "unsupported"
+      );
+    }
+    const verification = configuredOrAutomaticVerification(
+      config,
+      configuredVerification,
+      [
+        command("Cargo format", "cargo fmt --check"),
+        command(
+          "Cargo clippy",
+          "cargo clippy --all-targets --all-features -- -D warnings"
+        ),
+        command("Cargo tests", "cargo test --locked"),
+      ],
+      "Rust"
+    );
+    return languageProfile({
+      kind: "rust",
+      version,
+      manager: "cargo",
+      lockfile: cargoLock,
+      bootstrap: command("Fetch Cargo dependencies", "cargo fetch --locked"),
+      verification,
+      probes: [
+        exactVersionProbe(
+          "Rust",
+          "rustc --version | awk '{print $2}'",
+          version
+        ),
+        command("ripgrep", "rg --version", 30_000),
+        ...config.runtime.probes,
+      ],
+    });
+  }
+
+  return undefined;
+}
+
+function configuredOrAutomaticVerification(
+  config: AgentTrainConfig,
+  configured: readonly SandboxCommandConfig[],
+  automatic: readonly SandboxCommandConfig[],
+  language: string
+): readonly SandboxCommandConfig[] {
+  const verification =
+    config.runtime.verificationMode === "explicit"
+      ? configured
+      : [...automatic, ...configured];
+  if (verification.length === 0) {
+    throw new RuntimePreparationError(
+      `No safe ${language} verification commands were discovered. Configure runtime.verification explicitly.`,
+      "unsupported"
+    );
+  }
+  return verification;
+}
+
+function languageProfile(input: {
+  readonly kind: "python" | "go" | "rust";
+  readonly version: string;
+  readonly manager: "uv" | "go" | "cargo";
+  readonly managerVersion?: string;
+  readonly lockfile: string;
+  readonly bootstrap: SandboxCommandConfig;
+  readonly verification: readonly SandboxCommandConfig[];
+  readonly probes: readonly SandboxCommandConfig[];
+}): ToolchainProfile {
+  const value = {
+    schema: RUNTIME_SCHEMA_VERSION,
+    kind: input.kind,
+    languageVersion: input.version,
+    packageManager: input.manager,
+    packageManagerVersion: input.managerVersion,
+    lockfileDigest: stableDigest(input.lockfile),
+    bootstrap: input.bootstrap,
+    verification: input.verification,
+    probes: input.probes,
+  };
+  return { ...value, fingerprint: stableDigest(value) };
+}
+
+function exactLanguageVersion(value: string | undefined): string | undefined {
+  const version = value?.trim().replace(/^v/, "");
+  return version && /^\d+\.\d+\.\d+$/.test(version) ? version : undefined;
+}
+
 function autoVerificationCommands(
   manager: "pnpm" | "npm" | "yarn" | "bun",
   scripts: Readonly<Record<string, string>>
@@ -674,14 +975,15 @@ function bootstrapCommand(
   manager: "pnpm" | "npm" | "yarn" | "bun",
   lockfile: string
 ): SandboxCommandConfig {
+  const cachePath = packageManagerCachePath(manager);
   const invocation =
     manager === "pnpm"
-      ? "pnpm install --frozen-lockfile"
+      ? `pnpm install --frozen-lockfile --store-dir ${cachePath}`
       : manager === "npm"
-        ? "npm ci"
+        ? `npm ci --cache ${cachePath}`
         : manager === "yarn"
-          ? "yarn install --immutable"
-          : "bun install --frozen-lockfile";
+          ? `YARN_CACHE_FOLDER=${cachePath} yarn install --immutable`
+          : `BUN_INSTALL_CACHE_DIR=${cachePath} bun install --frozen-lockfile`;
   return command(`Install dependencies from ${lockfile}`, invocation);
 }
 
@@ -705,16 +1007,75 @@ function exactVersionProbe(
   );
 }
 
-function runtimeDockerfile(profile: ToolchainProfile): string {
+type RuntimeSourceRole = "base" | "toolchain" | "tools";
+
+interface RuntimeSourceReferences {
+  readonly base: string;
+  readonly toolchain: string;
+  readonly tools: string;
+}
+
+async function createTemporaryImageReferences(
+  runner: CommandRunner,
+  cwd: string,
+  imageIds: RuntimeSourceReferences
+): Promise<{
+  readonly references: RuntimeSourceReferences;
+  readonly created: readonly string[];
+}> {
+  const buildId = randomUUID().replaceAll("-", "");
+  const references = {} as Record<RuntimeSourceRole, string>;
+  const created: string[] = [];
+
+  for (const role of ["base", "toolchain", "tools"] as const) {
+    const imageId = imageIds[role];
+    const digest = requireDockerImageId(imageId, `${role} runtime`).slice(
+      "sha256:".length
+    );
+    const reference = `prtisan.invalid/runtime-input:${role}-${digest}-${buildId}`;
+    const tag = await runner.run(
+      "docker",
+      ["image", "tag", imageId, reference],
+      { cwd }
+    );
+    if (tag.exitCode !== 0) {
+      await removeTemporaryImageReferences(runner, cwd, created);
+      throw new RuntimePreparationError(
+        `Unable to create local ${role} runtime image reference from ${imageId}: ${trimOutput(
+          tag.stderr || tag.stdout
+        )}`
+      );
+    }
+    references[role] = reference;
+    created.push(reference);
+  }
+
+  return { references, created };
+}
+
+async function removeTemporaryImageReferences(
+  runner: CommandRunner,
+  cwd: string,
+  references: readonly string[]
+): Promise<void> {
+  for (const reference of [...references].reverse()) {
+    await runner.run("docker", ["image", "rm", reference], { cwd });
+  }
+}
+
+function runtimeDockerfile(
+  profile: ToolchainProfile,
+  references: RuntimeSourceReferences
+): string {
   const manager = profile.packageManager ?? "npm";
   const managerVersion = profile.packageManagerVersion
     ? requireSafeVersion(profile.packageManagerVersion, manager)
     : undefined;
   if (profile.kind === "bun") {
     return [
-      "ARG BASE_IMAGE",
-      "ARG TOOLCHAIN_IMAGE",
-      "ARG TOOLS_IMAGE",
+      `ARG BASE_IMAGE=${references.base}`,
+      `ARG TOOLCHAIN_IMAGE=${references.toolchain}`,
+      `ARG TOOLS_IMAGE=${references.tools}`,
       "FROM ${TOOLCHAIN_IMAGE} AS bun_runtime",
       "",
       "FROM ${TOOLS_IMAGE} AS tools",
@@ -733,6 +1094,55 @@ function runtimeDockerfile(profile: ToolchainProfile): string {
     ].join("\n");
   }
 
+  if (profile.kind === "python") {
+    return [
+      ...runtimeStageHeader(references),
+      "FROM ${TOOLCHAIN_IMAGE} AS language_runtime",
+      "RUN pip install --no-cache-dir uv==0.8.13",
+      "",
+      ...toolsStage(),
+      "FROM ${BASE_IMAGE}",
+      "USER root",
+      "COPY --from=language_runtime /usr/local/ /usr/local/",
+      "COPY --from=tools /usr/bin/rg /usr/local/bin/rg",
+      ...runtimeUserFooter(),
+    ].join("\n");
+  }
+
+  if (profile.kind === "go") {
+    return [
+      ...runtimeStageHeader(references),
+      "FROM ${TOOLCHAIN_IMAGE} AS language_runtime",
+      "",
+      ...toolsStage(),
+      "FROM ${BASE_IMAGE}",
+      "USER root",
+      "COPY --from=language_runtime /usr/local/go/ /usr/local/go/",
+      "COPY --from=tools /usr/bin/rg /usr/local/bin/rg",
+      "ENV PATH=/usr/local/go/bin:${PATH}",
+      ...runtimeUserFooter(),
+    ].join("\n");
+  }
+
+  if (profile.kind === "rust") {
+    return [
+      ...runtimeStageHeader(references),
+      "FROM ${TOOLCHAIN_IMAGE} AS language_runtime",
+      "RUN rustup component add rustfmt clippy",
+      "",
+      ...toolsStage(),
+      "FROM ${BASE_IMAGE}",
+      "USER root",
+      "COPY --from=language_runtime /usr/local/cargo/ /usr/local/cargo/",
+      "COPY --from=language_runtime /usr/local/rustup/ /usr/local/rustup/",
+      "COPY --from=tools /usr/bin/rg /usr/local/bin/rg",
+      "ENV PATH=/usr/local/cargo/bin:${PATH}",
+      "ENV RUSTUP_HOME=/usr/local/rustup",
+      "ENV CARGO_HOME=/home/agent/.cargo",
+      ...runtimeUserFooter(),
+    ].join("\n");
+  }
+
   const install =
     manager === "bun"
       ? "RUN true"
@@ -741,11 +1151,19 @@ function runtimeDockerfile(profile: ToolchainProfile): string {
         : "RUN true";
 
   return [
-    "ARG BASE_IMAGE",
-    "ARG TOOLCHAIN_IMAGE",
-    "ARG TOOLS_IMAGE",
+    `ARG BASE_IMAGE=${references.base}`,
+    `ARG TOOLCHAIN_IMAGE=${references.toolchain}`,
+    `ARG TOOLS_IMAGE=${references.tools}`,
     "FROM ${TOOLCHAIN_IMAGE} AS node_runtime",
     install,
+    "RUN set -eu; \\",
+    "  mkdir -p /runtime-libs; \\",
+    "  libatomic_path=\"$(ldd /usr/local/bin/node | awk '/libatomic\\.so\\.1/ { print $3; exit }')\"; \\",
+    '  if [ -n "${libatomic_path}" ]; then \\',
+    '    libatomic_dir="$(dirname "$(readlink -f "${libatomic_path}")")"; \\',
+    '    mkdir -p "/runtime-libs${libatomic_dir}"; \\',
+    '    cp -L "${libatomic_path}" "/runtime-libs${libatomic_dir}/libatomic.so.1"; \\',
+    "  fi",
     "",
     "FROM ${TOOLS_IMAGE} AS tools",
     "RUN apt-get update \\",
@@ -755,6 +1173,7 @@ function runtimeDockerfile(profile: ToolchainProfile): string {
     "FROM ${BASE_IMAGE}",
     "USER root",
     "COPY --from=node_runtime /usr/local/ /usr/local/",
+    "COPY --from=node_runtime /runtime-libs/ /",
     "COPY --from=tools /usr/bin/rg /usr/local/bin/rg",
     "ARG AGENT_UID=1000",
     "ARG AGENT_GID=1000",
@@ -764,12 +1183,67 @@ function runtimeDockerfile(profile: ToolchainProfile): string {
   ].join("\n");
 }
 
+function runtimeStageHeader(references: RuntimeSourceReferences): string[] {
+  return [
+    `ARG BASE_IMAGE=${references.base}`,
+    `ARG TOOLCHAIN_IMAGE=${references.toolchain}`,
+    `ARG TOOLS_IMAGE=${references.tools}`,
+  ];
+}
+
+function toolsStage(): string[] {
+  return [
+    "FROM ${TOOLS_IMAGE} AS tools",
+    "RUN apt-get update \\",
+    "  && apt-get install -y --no-install-recommends ripgrep \\",
+    "  && rm -rf /var/lib/apt/lists/*",
+    "",
+  ];
+}
+
+function runtimeUserFooter(): string[] {
+  return [
+    "ARG AGENT_UID=1000",
+    "ARG AGENT_GID=1000",
+    "USER ${AGENT_UID}:${AGENT_GID}",
+    "",
+  ];
+}
+
+function runtimeDockerfileDigest(profile: ToolchainProfile): string {
+  return stableDigest(
+    runtimeDockerfile(profile, {
+      base: "prtisan.invalid/runtime-template:base",
+      toolchain: "prtisan.invalid/runtime-template:toolchain",
+      tools: "prtisan.invalid/runtime-template:tools",
+    })
+  );
+}
+
 function toolchainStageImage(profile: ToolchainProfile): string {
   if (profile.kind === "bun") {
     return `oven/bun:${requireSafeVersion(
       profile.packageManagerVersion,
       "Bun"
     )}-debian`;
+  }
+  if (profile.kind === "python") {
+    return `python:${requireSafeVersion(
+      profile.languageVersion,
+      "Python"
+    )}-bookworm`;
+  }
+  if (profile.kind === "go") {
+    return `golang:${requireSafeVersion(
+      profile.languageVersion,
+      "Go"
+    )}-bookworm`;
+  }
+  if (profile.kind === "rust") {
+    return `rust:${requireSafeVersion(
+      profile.languageVersion,
+      "Rust"
+    )}-bookworm`;
   }
   return `node:${requireSafeVersion(
     profile.nodeVersion,
@@ -816,9 +1290,8 @@ async function packageManagerCacheMount(
   lockfileDigest: string | undefined
 ): Promise<PreparedRuntime["cacheMount"]> {
   if (!manager || !lockfileDigest) return undefined;
-  const hostPath = joinPath(
+  const hostPath = prtisanRepositoryDataPath(
     cwd,
-    ".sandcastle",
     "cache",
     "package-managers",
     manager,
@@ -827,15 +1300,26 @@ async function packageManagerCacheMount(
   await ensureDir(hostPath);
   return {
     hostPath,
-    sandboxPath:
-      manager === "pnpm"
-        ? "/home/agent/.local/share/pnpm/store"
-        : manager === "npm"
-          ? "/home/agent/.npm"
-          : manager === "yarn"
-            ? "/home/agent/.cache/yarn"
-            : "/home/agent/.bun/install/cache",
+    sandboxPath: packageManagerCachePath(manager),
   };
+}
+
+function packageManagerCachePath(
+  manager: NonNullable<ToolchainProfile["packageManager"]>
+): string {
+  return manager === "pnpm"
+    ? "/home/agent/.local/share/pnpm/store"
+    : manager === "npm"
+      ? "/home/agent/.npm"
+      : manager === "yarn"
+        ? "/home/agent/.cache/yarn"
+        : manager === "bun"
+          ? "/home/agent/.bun/install/cache"
+          : manager === "uv"
+            ? "/home/agent/.cache/uv"
+            : manager === "go"
+              ? "/home/agent/go/pkg/mod"
+              : "/home/agent/.cargo/registry";
 }
 
 async function runRuntimeProbes(
@@ -907,6 +1391,7 @@ async function runInRuntime(
     readonly runtime: PreparedRuntime;
   },
   worktreePath: string,
+  gitCommonDir: string,
   item: SandboxCommandConfig,
   deadlineAt: number,
   now: () => number
@@ -932,6 +1417,8 @@ async function runInRuntime(
     "HOME=/home/agent",
     "-v",
     `${worktreePath}:/home/agent/workspace`,
+    "-v",
+    `${gitCommonDir}:${gitCommonDir}:ro`,
   ];
   if (input.runtime.cacheMount) {
     args.push(
@@ -967,6 +1454,20 @@ async function runInRuntime(
   return commandResult(item.name, item.command, result, Date.now() - startedAt);
 }
 
+async function resolveGitCommonDirectory(
+  runner: CommandRunner,
+  cwd: string,
+  worktreePath: string
+): Promise<string> {
+  const result = await runner.run("git", ["rev-parse", "--git-common-dir"], {
+    cwd: worktreePath,
+  });
+  const path = result.stdout.trim();
+  return result.exitCode === 0 && path
+    ? resolvePath(worktreePath, path)
+    : joinPath(cwd, ".git");
+}
+
 function commandResult(
   name: string,
   invocation: string,
@@ -997,7 +1498,7 @@ function isInfrastructureCommandFailure(
     result.timedOut ||
     result.exitCode === 124 ||
     result.exitCode === 127 ||
-    /command not found|no such file or directory|cannot connect to the docker daemon|network is unreachable|temporary failure|could not resolve host/i.test(
+    /command not found|no such file or directory|not a git repository|cannot connect to the docker daemon|network is unreachable|temporary failure|could not resolve host/i.test(
       result.output
     )
   );
@@ -1103,6 +1604,13 @@ function redactOutput(value: string): string {
 function trimOutput(value: string, maxChars = 2_000): string {
   const trimmed = value.trim();
   return trimmed.length <= maxChars ? trimmed : trimmed.slice(-maxChars);
+}
+
+function isVanishedRuntimeImageError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such image|image .+ not found|not found:|failed to resolve source metadata/i.test(
+    message
+  );
 }
 
 function safeLabel(value: string): string {

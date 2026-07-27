@@ -1,4 +1,3 @@
-import { syntheticBaseBranch } from "./branching.js";
 import type { GitClient } from "./git.js";
 import type { GitHubClient } from "./github.js";
 import {
@@ -48,9 +47,6 @@ export async function restackAfterMerge(
     await restackDescendants(input, deps, graph, affected);
   }
 
-  await deps.git.deleteRemoteBranch(syntheticBaseBranch(input.mergedPrNumber));
-  await cleanupObsoleteSyntheticBranches(input, deps);
-
   return {
     graph,
     affected,
@@ -77,24 +73,9 @@ async function restackDescendants(
     const nextBase = nextBaseBranch(input.config, node.pr, openBlockerBranches);
 
     if (openBlockerBranches.length > 1) {
-      const synthetic = await deps.git.createSyntheticBaseCommit({
-        runId: input.runId,
-        label: `base-pr-${node.pr.number}`,
-        syntheticBranch: nextBase,
-        blockerBranches: openBlockerBranches,
-      });
-      await verifyRestackCommit(
-        input,
-        deps,
-        node.pr.number,
-        synthetic.commit,
-        `synthetic-base-${node.pr.number}`
+      throw new Error(
+        `PR #${node.pr.number} has multiple open parents. Prtisan v1 requires a linear stack.`
       );
-      await deps.git.pushVerifiedCommit({
-        branch: nextBase,
-        commit: synthetic.commit,
-        expectedRemoteSha: synthetic.expectedRemoteSha,
-      });
     }
 
     const rebased = await deps.git.createRebasedCommit({
@@ -186,23 +167,9 @@ function nextBaseBranch(
 ): string {
   if (openBlockerBranches.length === 0) return config.targetBranch;
   if (openBlockerBranches.length === 1) return openBlockerBranches[0] as string;
-  return syntheticBaseBranch(pr.number);
-}
-
-async function cleanupObsoleteSyntheticBranches(
-  input: Pick<TrainRestackInput, "config">,
-  deps: TrainRestackDeps
-): Promise<void> {
-  const graph = await loadCurrentGraph(input, deps);
-  const liveBases = new Set(
-    [...graph.nodes.values()].map((node) => node.pr.baseRefName)
+  throw new Error(
+    `PR #${pr.number} has multiple open parents. Prtisan v1 requires a linear stack.`
   );
-  for (const node of graph.nodes.values()) {
-    const synthetic = syntheticBaseBranch(node.pr.number);
-    if (!liveBases.has(synthetic)) {
-      await deps.git.deleteRemoteBranch(synthetic);
-    }
-  }
 }
 
 async function loadCurrentGraph(

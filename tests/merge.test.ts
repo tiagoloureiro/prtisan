@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentRunner } from "@/agent.js";
+import { AgentInfrastructureError, type AgentRunner } from "@/agent.js";
 import { executeMerge } from "@/commands/merge.js";
 import type { GitClient } from "@/git.js";
 import type { GitHubClient } from "@/github.js";
@@ -206,10 +206,156 @@ describe("merge command", () => {
       name: "check",
       logExcerpt: "test failed",
     });
-    expect(calls).toContain("push-verified:branch-44:head-2:head-1");
+    expect(calls).toContain("push-additive:branch-44:head-2:head-1");
     expect(calls).toContain("wait-checks:44");
     expect(validatedPulls).toEqual([[44], [44]]);
     expect(calls).toContain("merge:44");
+  });
+
+  test("runs another bounded CI repair when the repaired SHA has a new actionable failure", async () => {
+    const failing = validatedPullRequest({
+      number: 46,
+      headRefOid: "head-1",
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const failedRepair = validatedPullRequest({
+      number: 46,
+      headRefOid: "head-2",
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const repaired = validatedPullRequest({
+      number: 46,
+      headRefOid: "head-3",
+    });
+    const calls: string[] = [];
+    const repairEvidence: string[] = [];
+    let repairRound = 0;
+
+    await executeMerge(
+      { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+      {
+        github: githubSequence(
+          [[failing], [failedRepair], [repaired], []],
+          calls,
+          {
+            getPullRequests: [failing, failedRepair, failedRepair, repaired],
+            checkEvidenceSequence: [
+              [
+                {
+                  name: "check",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: "https://github.com/o/r/actions/runs/101",
+                  runId: "101",
+                  logExcerpt: "unit test failed in receipt parser",
+                },
+              ],
+              [
+                {
+                  name: "check",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: "https://github.com/o/r/actions/runs/102",
+                  runId: "102",
+                  logExcerpt: "typecheck failed in src/index.ts",
+                },
+              ],
+            ],
+            waitForChecks: [failedRepair, repaired],
+          }
+        ),
+        git: gitClient(calls),
+        agent: agentRunner({
+          repairCiFailure: async (input) => {
+            repairEvidence.push(input.checkEvidence[0]?.logExcerpt ?? "");
+            repairRound += 1;
+            return outcome({
+              branch: input.branch,
+              commits: [`head-${repairRound + 1}`],
+            });
+          },
+        }),
+        runtime: passingRuntime,
+        verification: passingVerification,
+        validatePullRequests: validationSequence([
+          failing,
+          failedRepair,
+          repaired,
+        ]),
+      }
+    );
+
+    expect(repairEvidence).toEqual([
+      "unit test failed in receipt parser",
+      "typecheck failed in src/index.ts",
+    ]);
+    expect(calls).toContain("push-additive:branch-46:head-2:head-1");
+    expect(calls).toContain("push-additive:branch-46:head-3:head-2");
+    expect(calls).toContain("merge:46");
+  });
+
+  test("stops CI convergence after the configured repair budget", async () => {
+    const failedHeads = ["head-1", "head-2", "head-3", "head-4"].map(
+      (headRefOid) =>
+        validatedPullRequest({
+          number: 47,
+          headRefOid,
+          statusCheckRollup: [failedActionsCheck()],
+        })
+    );
+    const calls: string[] = [];
+    let repairRound = 0;
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+        {
+          github: githubSequence(
+            failedHeads.map((pull) => [pull]),
+            calls,
+            {
+              getPullRequests: [
+                failedHeads[0] as PullRequest,
+                failedHeads[1] as PullRequest,
+                failedHeads[1] as PullRequest,
+                failedHeads[2] as PullRequest,
+                failedHeads[2] as PullRequest,
+                failedHeads[3] as PullRequest,
+              ],
+              checkEvidenceSequence: failedHeads.map((_, index) => [
+                {
+                  name: "check",
+                  status: "COMPLETED",
+                  conclusion: "FAILURE",
+                  detailsUrl: `https://github.com/o/r/actions/runs/${index + 1}`,
+                  runId: String(index + 1),
+                  logExcerpt: `new failure ${index + 1}`,
+                },
+              ]),
+              waitForChecks: failedHeads.slice(1),
+            }
+          ),
+          git: gitClient(calls),
+          agent: agentRunner({
+            repairCiFailure: async (input) => {
+              repairRound += 1;
+              return outcome({
+                branch: input.branch,
+                commits: [`head-${repairRound + 1}`],
+              });
+            },
+          }),
+          runtime: passingRuntime,
+          verification: passingVerification,
+          validatePullRequests: validationSequence(failedHeads),
+        }
+      )
+    ).rejects.toThrow(
+      "after 3 bounded CI repair round(s): check (FAILURE) — new failure 4"
+    );
+
+    expect(repairRound).toBe(3);
+    expect(calls.some((call) => call.includes("-r4"))).toBe(false);
   });
 
   test("persists CI repair fingerprints across merge invocations", async () => {
@@ -258,9 +404,129 @@ describe("merge command", () => {
         { cwd: "/repo", config: testConfig(), runId: "merge-two" },
         deps()
       )
-    ).rejects.toThrow("already consumed its single repair attempt");
+    ).rejects.toThrow("CI repair produced no commits");
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-three" },
+        deps()
+      )
+    ).rejects.toThrow("exhausted two candidates");
 
-    expect(repairCalls).toHaveLength(1);
+    expect(repairCalls).toHaveLength(2);
+  });
+
+  test("releases CI repair claims after infrastructure verification failure", async () => {
+    const failing = validatedPullRequest({
+      number: 50,
+      headRefOid: "head-1",
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const attempts = new InMemoryRepairAttemptStore();
+    const repairCalls: string[] = [];
+    const deps = () => ({
+      github: githubSequence([[failing]], [], {
+        checkEvidence: [
+          {
+            name: "check",
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+            detailsUrl: "https://github.com/o/r/actions/runs/101",
+            runId: "101",
+            logExcerpt: "test failed",
+          },
+        ],
+      }),
+      git: gitClient(),
+      agent: agentRunner({
+        repairCiFailure: async (input) => {
+          repairCalls.push(input.branch);
+          return outcome({ branch: input.branch, commits: ["head-2"] });
+        },
+      }),
+      runtime: passingRuntime,
+      verification: {
+        verify: async () => ({
+          status: "infra_failed" as const,
+          commands: [
+            {
+              name: "Project check",
+              command: "pnpm check",
+              exitCode: 128,
+              durationMs: 1,
+              timedOut: false,
+              output: "fatal: not a git repository",
+            },
+          ],
+        }),
+      },
+      repairAttempts: attempts,
+      validatePullRequests: validationSequence([failing]),
+    });
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-one" },
+        deps()
+      )
+    ).rejects.toThrow("CI repair failed host verification");
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-two" },
+        deps()
+      )
+    ).rejects.toThrow("CI repair failed host verification");
+
+    expect(repairCalls).toHaveLength(2);
+  });
+
+  test("releases CI repair claims when the repair agent fails before producing a candidate", async () => {
+    const failing = validatedPullRequest({
+      number: 51,
+      headRefOid: "head-1",
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const attempts = new InMemoryRepairAttemptStore();
+    let repairCalls = 0;
+    const deps = () => ({
+      github: githubSequence([[failing]], [], {
+        checkEvidence: [
+          {
+            name: "check",
+            status: "COMPLETED",
+            conclusion: "FAILURE",
+            detailsUrl: "https://github.com/o/r/actions/runs/101",
+            runId: "101",
+            logExcerpt: "test failed",
+          },
+        ],
+      }),
+      git: gitClient(),
+      agent: agentRunner({
+        repairCiFailure: async () => {
+          repairCalls += 1;
+          throw new AgentInfrastructureError("sandbox bootstrap failed");
+        },
+      }),
+      runtime: passingRuntime,
+      verification: passingVerification,
+      repairAttempts: attempts,
+      validatePullRequests: validationSequence([failing]),
+    });
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-one" },
+        deps()
+      )
+    ).rejects.toThrow("sandbox bootstrap failed");
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-two" },
+        deps()
+      )
+    ).rejects.toThrow("sandbox bootstrap failed");
+
+    expect(repairCalls).toBe(2);
   });
 
   test("does not launch CI repair when failure evidence has no logs", async () => {
@@ -299,8 +565,113 @@ describe("merge command", () => {
     ).rejects.toThrow("none is an actionable completed code failure with logs");
 
     expect(repairCalls).toEqual([]);
-    expect(comments[0]).toContain("Agent train could not make CI green");
+    expect(comments[0]).toContain("Prtisan could not make CI green");
     expect(comments[0]).toContain("check: FAILURE");
+  });
+
+  test("rejects out-of-scope CI gate edits before verification or push", async () => {
+    const failing = validatedPullRequest({
+      number: 52,
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const calls: string[] = [];
+    const github = githubSequence([[failing]], calls, {
+      checkEvidence: [
+        {
+          name: "check",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          detailsUrl: "https://github.com/o/r/actions/runs/101",
+          runId: "101",
+          logExcerpt: "assertion failed",
+        },
+      ],
+    });
+    github.getPullRequestDiff = async () => "diff --git a/src/a.ts b/src/a.ts";
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+        {
+          github,
+          git: gitClient(calls),
+          validatePullRequests: validationSequence([failing]),
+          runtime: passingRuntime,
+          verification: passingVerification,
+          agent: agentRunner({
+            repairCiFailure: async (input) => ({
+              ...outcome({ branch: input.branch, commits: ["head-2"] }),
+              structuredOutput: {
+                changedPaths: ["scripts/run-e2e.sh"],
+                addressedFindingIds: [],
+                summary: "Skip e2e without Docker.",
+                limitations: [],
+              },
+            }),
+          }),
+        }
+      )
+    ).rejects.toThrow("gate-sensitive edits outside the linked scope");
+
+    expect(calls.some((call) => call.startsWith("push-verified:"))).toBe(false);
+  });
+
+  test("rejects an authorized CI edit that weakens verification", async () => {
+    const failing = validatedPullRequest({
+      number: 53,
+      statusCheckRollup: [failedActionsCheck()],
+    });
+    const calls: string[] = [];
+    const github = githubSequence([[failing]], calls, {
+      checkEvidence: [
+        {
+          name: "check",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          detailsUrl: "https://github.com/o/r/actions/runs/101",
+          runId: "101",
+          logExcerpt: "integration assertion failed",
+        },
+      ],
+    });
+    github.getPullRequestDiff = async () =>
+      "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml";
+    const git = {
+      ...gitClient(calls),
+      diffBetween: async () =>
+        [
+          "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml",
+          "--- a/.github/workflows/ci.yml",
+          "+++ b/.github/workflows/ci.yml",
+          "+    continue-on-error: true",
+        ].join("\n"),
+    } as unknown as GitClient;
+
+    await expect(
+      executeMerge(
+        { cwd: "/repo", config: testConfig(), runId: "merge-test" },
+        {
+          github,
+          git,
+          validatePullRequests: validationSequence([failing]),
+          runtime: passingRuntime,
+          verification: passingVerification,
+          agent: agentRunner({
+            repairCiFailure: async (input) => ({
+              ...outcome({ branch: input.branch, commits: ["head-2"] }),
+              structuredOutput: {
+                changedPaths: [".github/workflows/ci.yml"],
+                addressedFindingIds: [],
+                summary: "Allow CI failures.",
+                limitations: [],
+              },
+            }),
+          }),
+        }
+      )
+    ).rejects.toThrow("weaken or skip authoritative verification");
+
+    expect(calls.some((call) => call.startsWith("push-verified:"))).toBe(false);
   });
 
   test("keeps required review as a hard stop without running repair", async () => {
@@ -769,6 +1140,7 @@ function githubSequence(
       }
       return [...(options.checkEvidence ?? [])];
     },
+    getRequiredCheckNames: async () => [],
     waitForPullRequestChecks: async (_repo: string, pullNumber: number) => {
       calls.push(`wait-checks:${pullNumber}`);
       if (Array.isArray(options.waitForChecks)) {
@@ -818,6 +1190,15 @@ function gitClient(calls: string[] = []): GitClient {
     }) => {
       calls.push(
         `push-verified:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
+      );
+    },
+    pushAdditiveCommit: async (input: {
+      readonly branch: string;
+      readonly commit: string;
+      readonly expectedRemoteSha: string;
+    }) => {
+      calls.push(
+        `push-additive:${input.branch}:${input.commit}:${input.expectedRemoteSha}`
       );
     },
     deleteLocalBranch: async (branch: string) => {

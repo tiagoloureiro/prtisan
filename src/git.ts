@@ -1,7 +1,8 @@
 import type { CommandRunner } from "./exec.js";
 import { mustRun } from "./exec.js";
 import { ensureDir } from "./fs.js";
-import { dirname, joinPath, normalizePath } from "./path.js";
+import { dirname, normalizePath } from "./path.js";
+import { prtisanRepositoryDataPath } from "./prtisan-paths.js";
 import type { AgentTrainConfig } from "./types.js";
 
 const ROOT_STANDARD_FILES = new Set([
@@ -88,6 +89,51 @@ export class GitClient {
     );
   }
 
+  async pushAdditiveCommit(input: {
+    readonly branch: string;
+    readonly commit: string;
+    readonly expectedRemoteSha: string;
+  }): Promise<void> {
+    const ancestry = await this.runner.run(
+      "git",
+      ["merge-base", "--is-ancestor", input.expectedRemoteSha, input.commit],
+      { cwd: this.cwd }
+    );
+    if (ancestry.exitCode !== 0) {
+      throw new Error(
+        `Refusing non-additive publication to ${input.branch}: ${input.commit} does not descend from ${input.expectedRemoteSha}.`
+      );
+    }
+    const remote = await mustRun(
+      this.runner,
+      "git",
+      [
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        this.config.remote,
+        `refs/heads/${input.branch}`,
+      ],
+      { cwd: this.cwd }
+    );
+    const observed = remote.stdout.trim().split(/\s+/)[0];
+    if (observed !== input.expectedRemoteSha) {
+      throw new Error(
+        `Refusing stale publication to ${input.branch}: expected ${input.expectedRemoteSha}, observed ${observed || "no remote head"}.`
+      );
+    }
+    await mustRun(
+      this.runner,
+      "git",
+      [
+        "push",
+        this.config.remote,
+        `${input.commit}:refs/heads/${input.branch}`,
+      ],
+      { cwd: this.cwd }
+    );
+  }
+
   async prepareBranchAt(branch: string, startPoint: string): Promise<void> {
     await this.upsertLocalBranch(branch, startPoint);
   }
@@ -126,6 +172,16 @@ export class GitClient {
     return result.stdout.trim();
   }
 
+  async diffBetween(baseRef: string, headRef: string): Promise<string> {
+    const result = await mustRun(
+      this.runner,
+      "git",
+      ["diff", "--no-ext-diff", `${baseRef}..${headRef}`],
+      { cwd: this.cwd }
+    );
+    return result.stdout;
+  }
+
   async readStandardsAtRef(
     ref: string,
     changedFiles: readonly string[]
@@ -161,91 +217,6 @@ export class GitClient {
     return contents;
   }
 
-  async createSyntheticBaseBranch(input: {
-    readonly runId: string;
-    readonly label: string;
-    readonly syntheticBranch: string;
-    readonly blockerBranches: readonly string[];
-  }): Promise<void> {
-    const prepared = await this.createSyntheticBaseCommit(input);
-    await this.pushVerifiedCommit({
-      branch: input.syntheticBranch,
-      commit: prepared.commit,
-      expectedRemoteSha: prepared.expectedRemoteSha,
-    });
-  }
-
-  async createSyntheticBaseCommit(input: {
-    readonly runId: string;
-    readonly label: string;
-    readonly syntheticBranch: string;
-    readonly blockerBranches: readonly string[];
-  }): Promise<{
-    readonly commit: string;
-    readonly expectedRemoteSha: string;
-  }> {
-    const worktreePath = joinPath(
-      this.cwd,
-      ".sandcastle",
-      "runs",
-      input.runId,
-      "worktrees",
-      input.label
-    );
-
-    await this.clearManagedWorktree(worktreePath);
-    await this.fetchBranch(this.config.targetBranch);
-    const remoteBranchExists = await this.branchExistsOnRemote(
-      input.syntheticBranch
-    );
-    const expectedRemoteSha = remoteBranchExists
-      ? await this.revParseRemoteBranch(input.syntheticBranch)
-      : "";
-    for (const branch of input.blockerBranches) {
-      await this.fetchBranch(branch);
-    }
-
-    try {
-      await mustRun(
-        this.runner,
-        "git",
-        [
-          "worktree",
-          "add",
-          "--force",
-          "--detach",
-          worktreePath,
-          `${this.config.remote}/${this.config.targetBranch}`,
-        ],
-        { cwd: this.cwd }
-      );
-
-      for (const branch of input.blockerBranches) {
-        await mustRun(
-          this.runner,
-          "git",
-          ["merge", "--no-edit", "--no-ff", `${this.config.remote}/${branch}`],
-          {
-            cwd: worktreePath,
-          }
-        );
-      }
-      const commit = await mustRun(this.runner, "git", ["rev-parse", "HEAD"], {
-        cwd: worktreePath,
-      });
-      return {
-        commit: commit.stdout.trim(),
-        expectedRemoteSha,
-      };
-    } finally {
-      await this.runner.run(
-        "git",
-        ["worktree", "remove", "--force", worktreePath],
-        { cwd: this.cwd }
-      );
-    }
-  }
-
   async rebaseBranchOntoBase(input: {
     readonly runId: string;
     readonly label: string;
@@ -268,14 +239,14 @@ export class GitClient {
     readonly branch: string;
     readonly baseBranch: string;
     readonly oldBaseAnchorSha?: string;
+    readonly sourceRef?: string;
   }): Promise<{
     readonly commit: string;
     readonly nextBaseAnchorSha: string;
     readonly expectedRemoteSha: string;
   }> {
-    const worktreePath = joinPath(
+    const worktreePath = prtisanRepositoryDataPath(
       this.cwd,
-      ".sandcastle",
       "runs",
       input.runId,
       "worktrees",
@@ -297,7 +268,7 @@ export class GitClient {
           "--force",
           "--detach",
           worktreePath,
-          `${this.config.remote}/${input.branch}`,
+          input.sourceRef ?? `${this.config.remote}/${input.branch}`,
         ],
         { cwd: this.cwd }
       );
@@ -356,9 +327,8 @@ export class GitClient {
     readonly nextBaseAnchorSha: string;
     readonly expectedRemoteSha: string;
   }> {
-    const worktreePath = joinPath(
+    const worktreePath = prtisanRepositoryDataPath(
       this.cwd,
-      ".sandcastle",
       "runs",
       input.runId,
       "worktrees",
@@ -439,14 +409,6 @@ export class GitClient {
     }
   }
 
-  async deleteRemoteBranch(branch: string): Promise<void> {
-    await this.runner.run(
-      "git",
-      ["push", this.config.remote, "--delete", branch],
-      { cwd: this.cwd }
-    );
-  }
-
   private async upsertLocalBranch(
     branch: string,
     startPoint: string
@@ -483,7 +445,7 @@ export class GitClient {
   ): Promise<void> {
     if (!(await this.isManagedBranchWorktree(worktreePath))) {
       throw new Error(
-        `Cannot prepare branch "${branch}" because it is checked out at ${worktreePath}. Switch that worktree to another branch or remove it before running agent-train.`
+        `Cannot prepare branch "${branch}" because it is checked out at ${worktreePath}. Switch that worktree to another branch or remove it before running Prtisan.`
       );
     }
 
@@ -522,10 +484,9 @@ export class GitClient {
   private async isManagedBranchWorktree(
     worktreePath: string
   ): Promise<boolean> {
-    const managedRoot = joinPath(
+    const managedRoot = prtisanRepositoryDataPath(
       await this.repoRoot(),
-      ".sandcastle",
-      "worktrees"
+      "runs"
     );
     const normalizedPath = normalizePath(worktreePath);
     return normalizedPath.startsWith(`${managedRoot}/`);
@@ -558,7 +519,7 @@ export class GitClient {
   }
 
   private async clearManagedWorktree(worktreePath: string): Promise<void> {
-    const managedRoot = joinPath(this.cwd, ".sandcastle", "runs");
+    const managedRoot = prtisanRepositoryDataPath(this.cwd, "runs");
     if (!worktreePath.startsWith(`${managedRoot}/`)) {
       throw new Error(
         `Refusing to clear unmanaged worktree path: ${worktreePath}`

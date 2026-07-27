@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { prtisanRepositoryStatePath } from "@/prtisan-paths.js";
 import { stableDigest } from "@/validation-hardening.js";
 import { singleFlight, ValidationLeaseManager } from "@/validation-lease.js";
 
@@ -20,7 +21,7 @@ describe("validation leases", () => {
   test("reclaims a fresh lease only when its owner PID is dead", async () => {
     const cwd = await temporaryDirectory();
     const key = "o/r:117:snapshot";
-    const lockRoot = join(cwd, ".sandcastle", "locks");
+    const lockRoot = prtisanRepositoryStatePath(cwd, "locks");
     const lockPath = join(lockRoot, stableDigest(key));
     await mkdir(lockPath, { recursive: true });
     await writeFile(
@@ -45,7 +46,7 @@ describe("validation leases", () => {
   test("reclaims an expired lease even while its PID is alive", async () => {
     const cwd = await temporaryDirectory();
     const key = "o/r:117:expired";
-    const lockRoot = join(cwd, ".sandcastle", "locks");
+    const lockRoot = prtisanRepositoryStatePath(cwd, "locks");
     const lockPath = join(lockRoot, stableDigest(key));
     await mkdir(lockPath, { recursive: true });
     await writeFile(

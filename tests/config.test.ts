@@ -28,8 +28,9 @@ describe("validation configuration compatibility", () => {
       autoProvision: true,
       verificationMode: "auto",
     });
+    expect(config.docker.imagePolicy).toBe("managed");
     expect(config.validation).toMatchObject({
-      maxRepairRounds: 1,
+      maxRepairRounds: 3,
       maxAgentRunsPerHead: 4,
       promptCharBudget: 32_000,
     });
@@ -58,6 +59,25 @@ describe("validation configuration compatibility", () => {
     expect((await loadConfig(all, "config.json")).retention).toMatchObject({
       keepSessions: true,
       sessionPolicy: "all",
+    });
+  });
+
+  test("honors an externally managed Docker image policy", async () => {
+    const cwd = await temporaryDirectory();
+    await writeFile(
+      join(cwd, "config.json"),
+      JSON.stringify({
+        repo: "o/r",
+        docker: {
+          imageName: "registry.example.test/team/runtime:stable",
+          imagePolicy: "external",
+        },
+      })
+    );
+
+    expect((await loadConfig(cwd, "config.json")).docker).toMatchObject({
+      imageName: "registry.example.test/team/runtime:stable",
+      imagePolicy: "external",
     });
   });
 

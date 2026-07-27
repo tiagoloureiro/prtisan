@@ -1,3 +1,5 @@
+import { writeFile } from "node:fs/promises";
+
 import { defaultConfig } from "@/config.js";
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
 import type { AgentTrainConfig, Issue, PullRequest } from "@/types.js";
@@ -68,6 +70,7 @@ export function pullRequest(input: Partial<PullRequest>): PullRequest {
     closingIssuesReferences: [],
     latestReviews: [],
     reviews: [],
+    comments: [],
     statusCheckRollup: [],
     ...input,
   };
@@ -102,6 +105,17 @@ export class FakeRunner implements CommandRunner {
       stderr: "",
       exitCode: 0,
     };
+    if (
+      command === "docker" &&
+      args[0] === "build" &&
+      response.exitCode === 0
+    ) {
+      const iidFile = args[args.indexOf("--iidfile") + 1];
+      const imageId = response.stdout.trim();
+      if (iidFile && /^sha256:[a-f0-9]{64}$/.test(imageId)) {
+        await writeFile(iidFile, `${imageId}\n`);
+      }
+    }
     return {
       ...response,
       command: [command, ...args],

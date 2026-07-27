@@ -4,6 +4,7 @@ import {
   buildCiRepairPrompt,
   buildIssueBranchReviewPrompt,
   buildMergeStateRepairPrompt,
+  buildRestackConflictRepairPrompt,
   buildReviewPrompt,
 } from "@/prompts.js";
 
@@ -68,6 +69,9 @@ describe("prompts", () => {
     expect(prompt).toContain("because GitHub checks failed");
     expect(prompt).toContain("Expected true to be false");
     expect(prompt).toContain("Fix only clear causes");
+    expect(prompt).toContain("Never rely on password-prompting sudo");
+    expect(prompt).toContain('"limitations": [');
+    expect(prompt).toContain("limitations must always be an array of strings");
   });
 
   test("merge-state repair prompt includes blockers and human-review boundary", () => {
@@ -83,5 +87,21 @@ describe("prompts", () => {
     expect(prompt).toContain("merge state DIRTY");
     expect(prompt).toContain("PR #20 is not mergeable yet");
     expect(prompt).toContain("Do not attempt to satisfy required human review");
+  });
+
+  test("restack conflict prompt freezes both contracts and unique diff", () => {
+    const prompt = buildRestackConflictRepairPrompt({
+      prNumber: 118,
+      branch: "repair",
+      baseBranch: "main",
+      parentContract: "Parent owns schema migration.",
+      childContract: "Child owns API use.",
+      uniqueDiff: "diff --git a/api.ts b/api.ts",
+    });
+
+    expect(prompt).toContain("Parent owns schema migration.");
+    expect(prompt).toContain("Child owns API use.");
+    expect(prompt).toContain("diff --git a/api.ts b/api.ts");
+    expect(prompt).toContain("make no commit");
   });
 });

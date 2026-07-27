@@ -213,10 +213,10 @@ export function primaryClosingIssueNumber(
 export function validationStatusFromPr(
   pr: Pick<
     PullRequest,
-    "latestReviews" | "reviews" | "headRefOid" | "baseRefOid"
+    "latestReviews" | "reviews" | "comments" | "headRefOid" | "baseRefOid"
   >
 ): PrValidationStatus {
-  const review = [...pr.latestReviews, ...pr.reviews]
+  const review = [...pr.latestReviews, ...pr.reviews, ...pr.comments]
     .reverse()
     .find((item) => item.body.includes(VALIDATION_REVIEW_MARKER));
   if (!review) {

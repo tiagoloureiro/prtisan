@@ -1,266 +1,159 @@
-import { SandcastleCodexRunner } from "./agent.js";
 import { executeInit, initSummary } from "./commands/init.js";
-import { executeMerge } from "./commands/merge.js";
-import { executeValidate } from "./commands/validate.js";
-import { loadConfig } from "./config.js";
 import { BunCommandRunner } from "./exec.js";
-import { GitClient } from "./git.js";
 import { GitHubClient } from "./github.js";
-import { assertRuntimeReady } from "./preflight.js";
-import { FileRepairAttemptStore } from "./repair-attempt-store.js";
-import { pruneRuntimeArtifacts } from "./retention.js";
-import { FileReviewCache } from "./review-cache.js";
-import { DockerRuntimeProvider, DockerVerificationRunner } from "./runtime.js";
-import { runTui } from "./tui/index.js";
-import type { ValidationScope } from "./types.js";
-import { ValidationLeaseManager } from "./validation-lease.js";
+import { prtisanPaths } from "./prtisan-paths.js";
+import {
+  assertSetupPlanFresh,
+  createSetupPlan,
+  SetupPlanStore,
+} from "./setup-plan.js";
+import { FileArtifactStore } from "./workflow/artifacts.js";
+import { SqliteWorkflowJournal } from "./workflow/journal.js";
+import { ProductionWorkflowEnvironment } from "./workflow/production.js";
+import { PrtisanWorkflow } from "./workflow/workflow.js";
+
+interface ParsedArgs {
+  readonly command?: "init" | "plan" | "apply" | "status" | "export";
+  readonly action?: "plan" | "apply";
+  readonly id?: string;
+  readonly cwd?: string;
+  readonly help: boolean;
+}
+
+type Command = NonNullable<ParsedArgs["command"]>;
+
+export function parseCliArgs(argv: readonly string[]): ParsedArgs {
+  const [rawCommand, ...rest] = argv;
+  if (!rawCommand || rawCommand === "--help" || rawCommand === "-h") {
+    return { help: true };
+  }
+  if (!["init", "plan", "apply", "status", "export"].includes(rawCommand)) {
+    throw new Error(`Unknown command: ${rawCommand}`);
+  }
+  const command = rawCommand as Command;
+  let action: ParsedArgs["action"];
+  let id: string | undefined;
+  let index = 0;
+  if (command === "init") {
+    const rawAction = rest[index++];
+    if (rawAction !== "plan" && rawAction !== "apply") {
+      throw new Error("init requires plan or apply <plan-id>.");
+    }
+    action = rawAction;
+    if (action === "apply") id = requireValue(rest, index++, "init apply");
+  } else if (command !== "plan") {
+    id = requireValue(rest, index++, command);
+  }
+
+  let cwd: string | undefined;
+  let help = false;
+  while (index < rest.length) {
+    const value = rest[index++] as string;
+    if (value === "--cwd") {
+      cwd = requireValue(rest, index++, "--cwd");
+    } else if (value === "--help" || value === "-h") {
+      help = true;
+    } else {
+      throw new Error(`Unknown option: ${value}`);
+    }
+  }
+  return { command, action, id, cwd, help };
+}
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const parsed = parseCliArgs(argv);
   if (!parsed.command || parsed.help) {
     printHelp();
-    return parsed.command ? 0 : 1;
-  }
-  if (!["init", "validate", "merge", "tui"].includes(parsed.command)) {
-    throw new Error(`Unknown command: ${parsed.command}`);
+    return 0;
   }
 
-  const cwd = parsed.options.cwd ?? Bun.env.PWD ?? ".";
-
-  if (parsed.command === "tui") {
-    return runTui({
-      cwd,
-      configPath: parsed.options.config,
-      repo: parsed.options.repo,
-      targetBranch: parsed.options.targetBranch,
-      repair: parsed.options.repair,
-      validateAffected: parsed.options.validateAffected,
-      scope: parsed.options.scope,
-    });
-  }
-
+  const cwd = parsed.cwd ?? Bun.env.PWD ?? ".";
+  const paths = prtisanPaths();
   const runner = new BunCommandRunner();
-  const github = new GitHubClient(runner, cwd);
-
   if (parsed.command === "init") {
-    const result = await executeInit(
-      {
-        cwd,
-        repo: parsed.options.repo,
-        targetBranch: parsed.options.targetBranch,
-        branch: parsed.options.branch,
-        remote: parsed.options.remote,
-        force: parsed.options.force,
-      },
-      { runner, github, log: console.error }
-    );
-    console.log(JSON.stringify(initSummary(result), null, 2));
-    return 0;
-  }
-
-  const config = await loadConfig(cwd, parsed.options.config, {
-    repo: parsed.options.repo,
-    targetBranch: parsed.options.targetBranch,
-  });
-  const git = new GitClient(runner, cwd, config);
-  const agent = new SandcastleCodexRunner(runner);
-  const runtime = new DockerRuntimeProvider(runner);
-  const verification = new DockerVerificationRunner(runner);
-  const cache = new FileReviewCache(cwd, config.validation.cacheTtlDays);
-  const lease = new ValidationLeaseManager(cwd, config.validation.leaseTtlMs);
-  const repairAttempts = new FileRepairAttemptStore(cwd);
-
-  await assertRuntimeReady({
-    cwd,
-    config,
-    runner,
-    github,
-    runtime,
-    log: console.error,
-  });
-  await pruneRuntimeArtifacts({ cwd, config, runner }).catch((error) => {
-    console.error(
-      `Retention pruning skipped: ${error instanceof Error ? error.message : String(error)}`
-    );
-  });
-
-  if (parsed.command === "validate") {
-    const result = await executeValidate(
-      {
-        cwd,
-        config,
-        repair: parsed.options.repair,
-        scope: parsed.options.scope,
-      },
-      {
-        github,
-        git,
-        agent,
-        runtime,
-        verification,
-        cache,
-        lease,
-        log: console.error,
+    const store = await SetupPlanStore.open(paths.journal);
+    try {
+      if (parsed.action === "plan") {
+        const plan = await createSetupPlan({ cwd, runner });
+        store.save(plan);
+        printJson(plan);
+        return 0;
       }
-    );
-    console.log(JSON.stringify(validationSummary(result), null, 2));
-    return 0;
-  }
-
-  if (parsed.command === "merge") {
-    const validatePullRequests = async (pullNumbers: readonly number[]) => {
-      return executeValidate(
+      const plan = store.load(parsed.id as string);
+      if (!plan) throw new Error(`Unknown Prtisan setup plan: ${parsed.id}.`);
+      await assertSetupPlanFresh(plan, runner);
+      const result = await executeInit(
         {
-          cwd,
-          config,
-          pullNumbers,
-          repair: true,
+          cwd: plan.cwd,
+          repo: plan.repo,
+          targetBranch: plan.targetBranch,
+          branch: plan.branch,
+          manifest: plan.proposedManifest,
         },
         {
-          github,
-          git,
-          agent,
-          runtime,
-          verification,
-          cache,
-          lease,
+          runner,
+          github: new GitHubClient(runner, plan.cwd),
           log: console.error,
         }
       );
-    };
-
-    const result = await executeMerge(
-      {
-        cwd,
-        config,
-        validateAffected: parsed.options.validateAffected,
-      },
-      {
-        github,
-        git,
-        agent,
-        runtime,
-        verification,
-        repairAttempts,
-        validatePullRequests,
-        log: console.error,
-      }
-    );
-    console.log(JSON.stringify(mergeSummary(result), null, 2));
-    return 0;
-  }
-
-  throw new Error(`Unhandled command: ${parsed.command}`);
-}
-
-interface ParsedArgs {
-  readonly command?: string;
-  readonly help: boolean;
-  readonly options: ParsedOptions;
-}
-
-interface ParsedOptions {
-  cwd?: string;
-  config?: string;
-  repo?: string;
-  targetBranch?: string;
-  branch?: string;
-  remote?: string;
-  force?: boolean;
-  repair?: boolean;
-  validateAffected?: boolean;
-  scope?: ValidationScope;
-}
-
-export function parseCliArgs(argv: readonly string[]): ParsedArgs {
-  const [command, ...rest] = argv;
-  const options: ParsedOptions = {
-    repair: true,
-    validateAffected: true,
-  };
-  let help = command === "--help" || command === "-h";
-
-  for (let index = 0; index < rest.length; index += 1) {
-    const arg = rest[index] as string;
-    if (arg === "--help" || arg === "-h") {
-      help = true;
-    } else if (arg === "--cwd") {
-      options.cwd = requireValue(rest, ++index, arg);
-    } else if (arg === "--config") {
-      options.config = requireValue(rest, ++index, arg);
-    } else if (arg === "--repo") {
-      options.repo = requireValue(rest, ++index, arg);
-    } else if (arg === "--target-branch") {
-      options.targetBranch = requireValue(rest, ++index, arg);
-    } else if (arg === "--branch") {
-      options.branch = requireValue(rest, ++index, arg);
-    } else if (arg === "--remote") {
-      options.remote = requireValue(rest, ++index, arg);
-    } else if (arg === "--force") {
-      options.force = true;
-    } else if (arg === "--no-repair") {
-      options.repair = false;
-    } else if (arg === "--no-validate-affected") {
-      options.validateAffected = false;
-    } else if (arg === "--scope") {
-      const scope = requireValue(rest, ++index, arg);
-      if (!["prs", "issues", "all"].includes(scope)) {
-        throw new Error(
-          `--scope must be one of prs, issues, or all; received ${scope}.`
-        );
-      }
-      options.scope = scope as ValidationScope;
-    } else {
-      throw new Error(`Unknown option: ${arg}`);
+      printJson(initSummary(result));
+      return 0;
+    } finally {
+      store.close();
     }
   }
 
-  return {
-    command,
-    help,
-    options,
-  };
+  const journal = await SqliteWorkflowJournal.open(paths.journal);
+  try {
+    const workflow = new PrtisanWorkflow(
+      journal,
+      new FileArtifactStore(paths.artifacts),
+      new ProductionWorkflowEnvironment(runner)
+    );
+    if (parsed.command === "plan") {
+      printJson(await workflow.plan({ cwd }));
+      return 0;
+    }
+    if (parsed.command === "apply") {
+      printJson(await workflow.apply(parsed.id as string));
+      return 0;
+    }
+    if (parsed.command === "status") {
+      printJson(await workflow.status(parsed.id as string));
+      return 0;
+    }
+    printJson(await workflow.export(parsed.id as string));
+    return 0;
+  } finally {
+    journal.close();
+  }
 }
 
 function requireValue(
   values: readonly string[],
   index: number,
-  flag: string
+  context: string
 ): string {
   const value = values[index];
   if (!value || value.startsWith("--")) {
-    throw new Error(`${flag} requires a value.`);
+    throw new Error(`${context} requires a value.`);
   }
   return value;
 }
 
-function validationSummary(
-  result: Awaited<ReturnType<typeof executeValidate>>
-): unknown {
-  return {
-    repo: result.repo,
-    checkedAt: result.checkedAt,
-    pullRequests: result.pullRequests,
-    issues: result.issues,
-  };
-}
-
-function mergeSummary(
-  result: Awaited<ReturnType<typeof executeMerge>>
-): unknown {
-  return {
-    repo: result.repo,
-    merged: result.merged,
-  };
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
 }
 
 function printHelp(): void {
-  console.log(`agent-train
+  console.log(`prtisan
 
 Usage:
-  agent-train init [--cwd <repo>] [--repo OWNER/REPO] [--target-branch <branch>] [--branch <branch>] [--remote <name>] [--force]
-  agent-train validate [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--scope prs|issues|all] [--no-repair]
-  agent-train merge [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--no-validate-affected]
-  agent-train tui [--cwd <repo>] [--repo OWNER/REPO] [--config <path>] [--target-branch <branch>] [--scope prs|issues|all]
+  prtisan init plan [--cwd <repo>]
+  prtisan init apply <plan-id>
+  prtisan plan [--cwd <repo>]
+  prtisan apply <plan-id>
+  prtisan status <plan-id>
+  prtisan export <plan-id>
 `);
 }

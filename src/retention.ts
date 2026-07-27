@@ -1,7 +1,11 @@
 import { open, stat, writeFile } from "node:fs/promises";
 
 import type { CommandRunner } from "./exec.js";
-import { joinPath, resolvePath } from "./path.js";
+import { joinPath } from "./path.js";
+import {
+  prtisanRepositoryDataPath,
+  resolveCodexHome,
+} from "./prtisan-paths.js";
 import type { AgentTrainConfig } from "./types.js";
 
 export async function pruneRuntimeArtifacts(input: {
@@ -11,7 +15,7 @@ export async function pruneRuntimeArtifacts(input: {
 }): Promise<void> {
   const ttl = `+${input.config.retention.ttlDays}`;
   const maxLogSize = `+${input.config.retention.maxLogBytes}c`;
-  const runsRoot = joinPath(input.cwd, ".sandcastle", "runs");
+  const runsRoot = prtisanRepositoryDataPath(input.cwd, "runs");
 
   if (await directoryExists(input.runner, runsRoot)) {
     await input.runner.run("find", [
@@ -55,7 +59,7 @@ export async function pruneRuntimeArtifacts(input: {
   await input.runner.run("git", ["worktree", "prune"], { cwd: input.cwd });
   await pruneReviewBranches(input.runner, input.cwd);
   for (const subdir of ["logs", "patches"]) {
-    const path = joinPath(input.cwd, ".sandcastle", subdir);
+    const path = prtisanRepositoryDataPath(input.cwd, subdir);
     if (!(await directoryExists(input.runner, path))) continue;
     await input.runner.run("find", [
       path,
@@ -83,7 +87,7 @@ export async function pruneRuntimeArtifacts(input: {
     }
   }
 
-  const codexHome = resolvePath(input.cwd, input.config.docker.codexHome);
+  const codexHome = resolveCodexHome(input.cwd, input.config.docker.codexHome);
   for (const subdir of ["log", "sessions"]) {
     const path = joinPath(codexHome, subdir);
     if (!(await directoryExists(input.runner, path))) continue;
@@ -106,7 +110,7 @@ export async function pruneRuntimeArtifacts(input: {
   }
 
   for (const subdir of ["cache", "runtime"]) {
-    const path = joinPath(input.cwd, ".sandcastle", subdir);
+    const path = prtisanRepositoryDataPath(input.cwd, subdir);
     if (!(await directoryExists(input.runner, path))) continue;
     await input.runner.run("find", [
       path,
@@ -209,17 +213,13 @@ async function pruneReviewBranches(
 ): Promise<void> {
   const refs = await runner.run(
     "git",
-    [
-      "for-each-ref",
-      "--format=%(refname:short)",
-      "refs/heads/agent-train/review",
-    ],
+    ["for-each-ref", "--format=%(refname:short)", "refs/heads/prtisan/review"],
     { cwd }
   );
   if (refs.exitCode !== 0) return;
 
   for (const branch of refs.stdout.split(/\r?\n/).filter(Boolean)) {
-    if (!branch.startsWith("agent-train/review/")) continue;
+    if (!branch.startsWith("prtisan/review/")) continue;
     await runner.run("git", ["branch", "-D", branch], { cwd });
   }
 }

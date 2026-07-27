@@ -37,7 +37,7 @@ export interface ValidationReviewMetadata {
   readonly findingIds: readonly string[];
 }
 
-export const VALIDATION_REVIEW_MARKER = "agent-train:validation";
+export const VALIDATION_REVIEW_MARKER = "prtisan:validation";
 
 export function preparePullRequestReview(input: {
   readonly pr: PullRequest;
@@ -141,15 +141,15 @@ function buildReviewSummaryBody(
   summaryFindings: readonly ReviewFinding[]
 ): string {
   if (findings.length === 0) {
-    return "Agent train validation completed with no findings.";
+    return "Prtisan validation completed with no findings.";
   }
 
   if (summaryFindings.length === 0) {
-    return "Agent train validation completed. All findings were attached inline.";
+    return "Prtisan validation completed.";
   }
 
   return [
-    "Agent train validation completed. These findings could not be attached to an exact changed line:",
+    "Prtisan validation completed with findings:",
     "",
     ...summaryFindings.map(
       (finding) =>

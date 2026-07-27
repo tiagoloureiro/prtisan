@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  DockerBaseImageManager,
+  type ResolvedDockerImage,
+} from "./docker-image.js";
 import type { CommandRunner } from "./exec.js";
 import type { GitHubClient } from "./github.js";
-import { resolvePath } from "./path.js";
+import { resolveCodexHome } from "./prtisan-paths.js";
 import type { RuntimeProvider } from "./runtime.js";
 import type { AgentTrainConfig } from "./types.js";
 
@@ -20,6 +24,7 @@ export async function checkRuntimeReadiness(input: {
   readonly runner: CommandRunner;
   readonly github?: Pick<GitHubClient, "assertReady">;
   readonly runtime?: RuntimeProvider;
+  readonly baseImage?: ResolvedDockerImage;
 }): Promise<RuntimeReadinessDiagnostic[]> {
   const diagnostics: RuntimeReadinessDiagnostic[] = [];
 
@@ -28,7 +33,7 @@ export async function checkRuntimeReadiness(input: {
     status: Bun.version ? "ok" : "failed",
     details: Bun.version
       ? `Bun ${Bun.version}`
-      : "agent-train must be run with Bun.",
+      : "Prtisan must be run with Bun.",
   });
 
   diagnostics.push(
@@ -67,7 +72,7 @@ export async function checkRuntimeReadiness(input: {
     input.runner,
     "Docker image",
     "docker",
-    ["image", "inspect", input.config.docker.imageName],
+    ["image", "inspect", input.baseImage?.id ?? input.config.docker.imageName],
     input.cwd
   );
   diagnostics.push(imageDiagnostic);
@@ -76,22 +81,28 @@ export async function checkRuntimeReadiness(input: {
       await dockerImageDefaultCommandDiagnostic(
         input.runner,
         input.config,
-        input.cwd
+        input.cwd,
+        input.baseImage?.id
       )
     );
   }
 
-  const codexHome = resolvePath(input.cwd, input.config.docker.codexHome);
-  const codexHomeCheck = await input.runner.run("test", ["-d", codexHome], {
-    cwd: input.cwd,
-  });
+  const codexHome = resolveCodexHome(input.cwd, input.config.docker.codexHome);
+  const codexAuthPath = `${codexHome}/auth.json`;
+  const codexHomeCheck = await input.runner.run(
+    "test",
+    ["-d", codexHome, "-a", "-s", codexAuthPath],
+    {
+      cwd: input.cwd,
+    }
+  );
   diagnostics.push({
     name: "Dedicated CODEX_HOME",
     status: codexHomeCheck.exitCode === 0 ? "ok" : "failed",
     details:
       codexHomeCheck.exitCode === 0
-        ? codexHome
-        : `Dedicated CODEX_HOME is missing at ${codexHome}. Create it and seed Codex auth before running agents.`,
+        ? `${codexHome} (authenticated)`
+        : `Shared CODEX_HOME is not authenticated at ${codexHome}. Run CODEX_HOME="${codexHome}" codex login once before running agents.`,
   });
 
   if (
@@ -113,34 +124,65 @@ export async function assertRuntimeReady(input: {
   readonly runner: CommandRunner;
   readonly github?: Pick<GitHubClient, "assertReady">;
   readonly runtime?: RuntimeProvider;
+  readonly baseImages?: DockerBaseImageManager;
   readonly log?: (message: string) => void;
 }): Promise<void> {
-  let diagnostics = await checkRuntimeReadiness(input);
-  const imageDiagnostic = diagnostics.find(
-    (item) => item.name === "Docker image"
-  );
-  if (isMissingDockerImageDiagnostic(imageDiagnostic)) {
-    const buildDiagnostic = await buildDockerImage(input);
-    diagnostics =
-      buildDiagnostic.status === "ok"
-        ? await checkRuntimeReadiness(input)
-        : [
-            ...diagnostics.filter((item) => item !== imageDiagnostic),
-            buildDiagnostic,
-          ];
-  }
-
+  const diagnostics = await prepareRuntimeReadiness(input);
   const failed = diagnostics.filter((item) => item.status === "failed");
   if (failed.length === 0) return;
+  throwReadinessError(failed);
+}
 
-  throw new Error(
-    [
-      "Runtime readiness failed:",
-      ...failed.map(
-        (item) => `- ${item.name}: ${item.details ?? "check failed"}`
+export async function prepareRuntimeReadiness(input: {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runner: CommandRunner;
+  readonly github?: Pick<GitHubClient, "assertReady">;
+  readonly runtime?: RuntimeProvider;
+  readonly baseImages?: DockerBaseImageManager;
+  readonly log?: (message: string) => void;
+}): Promise<RuntimeReadinessDiagnostic[]> {
+  const baseImages =
+    input.baseImages ?? new DockerBaseImageManager(input.runner);
+  const initialDiagnostics = await checkRuntimeReadiness({
+    ...input,
+    runtime: undefined,
+  });
+  let baseImage: ResolvedDockerImage;
+  try {
+    if (input.config.docker.imagePolicy === "managed") {
+      input.log?.(
+        `Building managed Docker image ${input.config.docker.imageName} from ${input.config.docker.dockerfile}`
+      );
+    }
+    baseImage = await baseImages.ensure(input);
+  } catch (error) {
+    const failedImage = initialDiagnostics.find(
+      (item) => item.name === "Docker image"
+    );
+    const imageFailure = {
+      name:
+        input.config.docker.imagePolicy === "managed"
+          ? "Docker image build"
+          : "Docker image",
+      status: "failed" as const,
+      details: dockerBuildFailureDetails(
+        error instanceof Error ? error.message : String(error),
+        input.config.docker.imageName,
+        input.config.docker.dockerfile,
+        input.config.docker.context
       ),
-    ].join("\n")
-  );
+    };
+    return [
+      ...initialDiagnostics.filter(
+        (item) =>
+          item !== failedImage && item.name !== "Docker image default command"
+      ),
+      imageFailure,
+    ];
+  }
+
+  return checkRuntimeReadiness({ ...input, baseImage });
 }
 
 export async function assertPreflight(input: {
@@ -170,47 +212,15 @@ async function commandDiagnostic(
   };
 }
 
-async function buildDockerImage(input: {
-  readonly cwd: string;
-  readonly config: AgentTrainConfig;
-  readonly runner: CommandRunner;
-  readonly log?: (message: string) => void;
-}): Promise<RuntimeReadinessDiagnostic> {
-  const imageName = input.config.docker.imageName;
-  input.log?.(
-    `Docker image ${imageName} is missing; building from .sandcastle/Dockerfile`
-  );
-  const result = await input.runner.run(
-    "docker",
-    [
-      "build",
-      "-t",
-      imageName,
-      "--build-arg",
-      `AGENT_UID=${runtimeUid()}`,
-      "--build-arg",
-      `AGENT_GID=${runtimeGid()}`,
-      "-f",
-      ".sandcastle/Dockerfile",
-      ".",
-    ],
-    { cwd: input.cwd }
-  );
-
-  return {
-    name: "Docker image build",
-    status: result.exitCode === 0 ? "ok" : "failed",
-    details:
-      result.exitCode === 0
-        ? `Built ${imageName} from .sandcastle/Dockerfile.`
-        : dockerBuildFailureDetails(result.stderr || result.stdout, imageName),
-  };
-}
-
-function dockerBuildFailureDetails(output: string, imageName: string): string {
+function dockerBuildFailureDetails(
+  output: string,
+  imageName: string,
+  dockerfile: string,
+  context: string
+): string {
   const details =
     output.trim() ||
-    `docker build -t ${imageName} -f .sandcastle/Dockerfile . failed`;
+    `docker build -t ${imageName} -f ${dockerfile} ${context} failed`;
   if (
     /groupadd: GID '\d+' already exists|useradd: UID \d+ is not unique/i.test(
       details
@@ -224,20 +234,14 @@ function dockerBuildFailureDetails(output: string, imageName: string): string {
   return details;
 }
 
-function isMissingDockerImageDiagnostic(
-  diagnostic: RuntimeReadinessDiagnostic | undefined
-): boolean {
-  if (!diagnostic || diagnostic.status !== "failed") return false;
-  return /no such image|not found/i.test(diagnostic.details ?? "");
-}
-
 async function dockerImageDefaultCommandDiagnostic(
   runner: CommandRunner,
   config: AgentTrainConfig,
-  cwd: string
+  cwd: string,
+  resolvedImage?: string
 ): Promise<RuntimeReadinessDiagnostic> {
-  const containerName = `agent-train-preflight-${randomUUID()}`;
-  const imageName = config.docker.imageName;
+  const containerName = `prtisan-preflight-${randomUUID()}`;
+  const imageName = resolvedImage ?? config.docker.imageName;
   const run = await runner.run(
     "docker",
     [
@@ -378,4 +382,17 @@ function firstLine(value: string): string | undefined {
     .split("\n")
     .find((line) => line.trim().length > 0)
     ?.trim();
+}
+
+function throwReadinessError(
+  failed: readonly RuntimeReadinessDiagnostic[]
+): never {
+  throw new Error(
+    [
+      "Runtime readiness failed:",
+      ...failed.map(
+        (item) => `- ${item.name}: ${item.details ?? "check failed"}`
+      ),
+    ].join("\n")
+  );
 }

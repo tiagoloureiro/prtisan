@@ -6,6 +6,7 @@ import {
   ciFailureFingerprint,
   GitHubClient,
   isPullRequestGreen,
+  managedCommentSection,
   pullRequestCheckStatus,
   sanitizeGitHubText,
 } from "@/github.js";
@@ -250,6 +251,114 @@ describe("GitHubClient", () => {
     expect(checks.successful.map((check) => check.name)).toEqual(["lint"]);
   });
 
+  test("waits for checks on the pushed commit instead of accepting a stale PR rollup", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue(
+      JSON.stringify({
+        ...pullRequest({
+          headRefOid: "old-head",
+          statusCheckRollup: [
+            {
+              name: "test",
+              status: "COMPLETED",
+              conclusion: "FAILURE",
+            },
+          ],
+        }),
+      })
+    );
+    runner.enqueue(
+      JSON.stringify({
+        ...pullRequest({
+          headRefOid: "new-head",
+          statusCheckRollup: [
+            {
+              name: "test",
+              status: "COMPLETED",
+              conclusion: "FAILURE",
+            },
+          ],
+        }),
+      })
+    );
+    runner.enqueue(
+      JSON.stringify({
+        check_runs: [
+          {
+            name: "test",
+            status: "in_progress",
+            details_url: "https://github.com/o/r/actions/runs/201",
+          },
+        ],
+      })
+    );
+    runner.enqueue(JSON.stringify({ statuses: [] }));
+    runner.enqueue(
+      JSON.stringify({
+        ...pullRequest({
+          headRefOid: "new-head",
+          statusCheckRollup: [],
+        }),
+      })
+    );
+    runner.enqueue(
+      JSON.stringify({
+        check_runs: [
+          {
+            name: "test",
+            status: "completed",
+            conclusion: "success",
+            details_url: "https://github.com/o/r/actions/runs/202",
+          },
+        ],
+      })
+    );
+    runner.enqueue(JSON.stringify({ statuses: [] }));
+
+    const settled = await new GitHubClient(
+      runner,
+      "/repo"
+    ).waitForPullRequestChecks("o/r", 1, 200, 1, {
+      headRefOid: "new-head",
+      expectedCheckNames: ["test"],
+      startGraceMs: 1,
+    });
+
+    expect(settled.headRefOid).toBe("new-head");
+    expect(pullRequestCheckStatus(settled).successful).toEqual([
+      expect.objectContaining({ name: "test", runId: "202" }),
+    ]);
+    expect(
+      runner.calls.filter(
+        (call) =>
+          call.command === "gh" &&
+          call.args.includes(
+            "/repos/o/r/commits/new-head/check-runs?per_page=100"
+          )
+      )
+    ).toHaveLength(2);
+  });
+
+  test("reads required status contexts from branch protection when available", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue(
+      JSON.stringify({
+        contexts: ["lint"],
+        checks: [{ context: "test", app_id: 1 }],
+      })
+    );
+
+    expect(
+      await new GitHubClient(runner, "/repo").getRequiredCheckNames(
+        "o/r",
+        "release/next"
+      )
+    ).toEqual(["lint", "test"]);
+    expect(runner.calls[0]?.args).toContain(
+      "/repos/o/r/branches/release%2Fnext/protection/required_status_checks"
+    );
+  });
+
   test("fetches GitHub Actions failed-check logs and keeps external checks as summary evidence", async () => {
     const runner = new FakeRunner();
     runner.enqueue("failing test log");
@@ -334,6 +443,13 @@ describe("GitHubClient", () => {
           logExcerpt: "pnpm: command not found",
         },
         {
+          name: "missing-docker",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "6",
+          logExcerpt: "Docker is required to run Playwright e2e tests.",
+        },
+        {
           name: "actionable",
           status: "COMPLETED",
           conclusion: "FAILURE",
@@ -402,10 +518,10 @@ describe("GitHubClient", () => {
 
     const pr = await client.createOrUpdatePullRequest({
       repo: "o/r",
-      title: "Configure Agent PR Train",
+      title: "Configure Prtisan",
       body: "body",
       baseBranch: "main",
-      headBranch: "agent-train/setup",
+      headBranch: "prtisan/setup",
     });
 
     expect(pr.number).toBe(211);
@@ -446,6 +562,69 @@ describe("GitHubClient", () => {
       reason: "PR #12 is still waiting for required review approval.",
     });
   });
+
+  test("updates the one managed PR summary comment in place", async () => {
+    const runner = new FakeRunner();
+    runner.enqueue(
+      JSON.stringify([{ id: 42, body: "<!-- prtisan:summary -->\nold status" }])
+    );
+    runner.enqueue("");
+
+    await new GitHubClient(runner, "/repo").upsertPullRequestComment(
+      "o/r",
+      117,
+      "prtisan:summary",
+      "<!-- prtisan:summary -->\nnew status"
+    );
+
+    expect(runner.calls[1]?.args).toContain("/repos/o/r/issues/comments/42");
+    expect(runner.calls[1]?.args).toContain("PATCH");
+  });
+
+  test("classifies Titally runner prerequisites as external", () => {
+    const actionable = actionablePullRequestCheckEvidence(
+      [
+        {
+          name: "CI",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "9001",
+          logExcerpt:
+            "sudo: a password is required\nsudo: timed out reading password",
+        },
+        {
+          name: "CI",
+          status: "COMPLETED",
+          conclusion: "FAILURE",
+          runId: "9002",
+          logExcerpt:
+            "node: error while loading shared libraries: libatomic.so.1: cannot open shared object file",
+        },
+      ],
+      { maxLogChars: 10_000, maxTotalChars: 10_000 }
+    );
+
+    expect(actionable).toEqual([]);
+  });
+
+  test("preserves independently managed workflow and validation sections", () => {
+    const body = [
+      "<!-- prtisan:summary -->",
+      "<!-- prtisan:workflow:start -->",
+      "workflow state",
+      "<!-- prtisan:workflow:end -->",
+      "<!-- prtisan:validation:start -->",
+      "validation evidence",
+      "<!-- prtisan:validation:end -->",
+    ].join("\n");
+
+    expect(managedCommentSection([{ body }], "workflow")).toContain(
+      "workflow state"
+    );
+    expect(managedCommentSection([{ body }], "validation")).toContain(
+      "validation evidence"
+    );
+  });
 });
 
 class ClosedBranchPrRunner extends FakeRunner {
@@ -465,7 +644,7 @@ class ClosedBranchPrRunner extends FakeRunner {
             ? [
                 pullRequest({
                   number: 211,
-                  headRefName: "agent-train/setup",
+                  headRefName: "prtisan/setup",
                   headRefOid: "new-sha",
                 }),
               ]
@@ -474,7 +653,7 @@ class ClosedBranchPrRunner extends FakeRunner {
               pullRequest({
                 number: 210,
                 state: "CLOSED",
-                headRefName: "agent-train/setup",
+                headRefName: "prtisan/setup",
                 headRefOid: "old-sha",
               }),
             ];
@@ -510,7 +689,7 @@ function isSetupPrList(command: string, args: readonly string[]): boolean {
     args[0] === "pr" &&
     args[1] === "list" &&
     args.includes("--head") &&
-    args[args.indexOf("--head") + 1] === "agent-train/setup"
+    args[args.indexOf("--head") + 1] === "prtisan/setup"
   );
 }
 

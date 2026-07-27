@@ -1,4 +1,9 @@
-import type { AgentRunner } from "./agent.js";
+import {
+  AgentExecutionError,
+  AgentInfrastructureError,
+  AgentOutputError,
+  type AgentRunner,
+} from "./agent.js";
 import type { GitClient } from "./git.js";
 import {
   actionablePullRequestCheckEvidence,
@@ -66,10 +71,10 @@ export interface ReadyPullRequest {
   readonly node: OpenPrNode;
 }
 
-const CHECK_WAIT_TIMEOUT_MS = 15 * 60 * 1000;
 const CHECK_WAIT_INTERVAL_MS = 15_000;
 const POST_REPAIR_HEAD_REFRESH_ATTEMPTS = 10;
 const POST_REPAIR_HEAD_REFRESH_INTERVAL_MS = 2_000;
+const CI_REPAIR_ATTEMPT_POLICY_VERSION = 2;
 const MERGE_STATE_REPAIR_LIMIT = 1;
 const UNKNOWN_REFRESH_BACKOFF_MS = [2_000, 5_000, 10_000] as const;
 const REPAIRABLE_MERGE_STATES = new Set(["BEHIND", "DIRTY", "UNKNOWN"]);
@@ -81,6 +86,7 @@ export async function preparePullRequestForMerge(
   let currentGraph = input.graph;
   const repairAttempts =
     deps.repairAttempts ?? new InMemoryRepairAttemptStore();
+  let ciRepairAttempts = 0;
   let mergeStateRepairAttempts = 0;
   const validationAttempts = new Set<string>();
 
@@ -141,7 +147,7 @@ export async function preparePullRequestForMerge(
       await deps.github.waitForPullRequestChecks(
         input.config.repo,
         node.pr.number,
-        CHECK_WAIT_TIMEOUT_MS,
+        input.config.validation.checkCompletionTimeoutMs,
         CHECK_WAIT_INTERVAL_MS
       );
       currentGraph = await loadCurrentGraph(input, deps);
@@ -163,6 +169,13 @@ export async function preparePullRequestForMerge(
           `PR #${node.pr.number} has failing checks, but none is an actionable completed code failure with logs.`
         );
       }
+      if (ciRepairAttempts >= input.config.validation.maxRepairRounds) {
+        await postUnresolvedCiRepairComment(input, deps, node.pr, allEvidence);
+        throw new Error(
+          `PR #${node.pr.number} still has ${checks.failed.length} failing status check(s) after ${ciRepairAttempts} bounded CI repair round(s): ${formatCheckFailureSummary(evidence)}`
+        );
+      }
+      ciRepairAttempts += 1;
       const fingerprint = ciFailureFingerprint(node.pr.headRefOid, evidence);
       const evidenceSignature = ciFailureEvidenceSignature(evidence);
       currentGraph = await repairCiFailure(
@@ -172,7 +185,8 @@ export async function preparePullRequestForMerge(
         evidence,
         fingerprint,
         evidenceSignature,
-        repairAttempts
+        repairAttempts,
+        ciRepairAttempts
       );
       continue;
     }
@@ -259,7 +273,7 @@ async function validateCurrentPullRequest(
 ): Promise<OpenPrGraph | undefined> {
   if (!deps.validatePullRequests) {
     throw new Error(
-      `PR #${node.pr.number} needs agent-train validation, but merge was not configured with a validation runner.`
+      `PR #${node.pr.number} needs Prtisan validation, but preparation has no validation runner.`
     );
   }
 
@@ -298,7 +312,8 @@ async function repairCiFailure(
   evidence: readonly PullRequestCheckEvidence[],
   fingerprint: string,
   evidenceSignature: string,
-  repairAttempts: RepairAttemptStore
+  repairAttempts: RepairAttemptStore,
+  repairRound: number
 ): Promise<OpenPrGraph> {
   const agent = requireAgent(deps);
   const { runtime, verification } = await prepareRepairEnvironment(
@@ -306,35 +321,51 @@ async function repairCiFailure(
     deps,
     node.pr
   );
-  const repairBranch = `agent-train/repair/ci-${node.pr.number}-${safeRunId(
+  const repairBranch = `prtisan/repair/ci-${node.pr.number}-${safeRunId(
     input.runId
-  )}`;
+  )}-r${repairRound}`;
   await deps.git.prepareBranchAt(repairBranch, node.pr.headRefOid);
 
   try {
-    if (
-      !(await repairAttempts.claim(`ci:fingerprint:${fingerprint}`)) ||
-      !(await repairAttempts.claim(`ci:evidence:${evidenceSignature}`))
-    ) {
+    const attemptScope = `${input.config.repo}:pr-${node.pr.number}`;
+    const claimedAttemptKeys = await claimRepairAttemptSlot(repairAttempts, [
+      `ci:v${CI_REPAIR_ATTEMPT_POLICY_VERSION}:${attemptScope}:fingerprint:${fingerprint}`,
+      `ci:v${CI_REPAIR_ATTEMPT_POLICY_VERSION}:${attemptScope}:evidence:${evidenceSignature}`,
+    ]);
+    if (!claimedAttemptKeys) {
       await postUnresolvedCiRepairComment(input, deps, node.pr, evidence);
       throw new Error(
-        `PR #${node.pr.number} CI failure already consumed its single repair attempt.`
+        `PR #${node.pr.number} CI failure exhausted two candidates for the unchanged root cause.`
       );
     }
-    deps.log?.(`Repairing failing CI for PR #${node.pr.number}`);
-    const outcome = await agent.repair({
-      kind: "ci-failure",
-      cwd: input.cwd,
-      config: input.config,
-      runId: input.runId,
-      issue: node.issue,
-      relatedIssues: node.relatedIssues,
-      prNumber: node.pr.number,
-      branch: repairBranch,
-      baseBranch: node.pr.headRefName,
-      checkEvidence: evidence,
-      runtime,
-    });
+    deps.log?.(
+      `Repairing failing CI for PR #${node.pr.number} (round ${repairRound}/${input.config.validation.maxRepairRounds})`
+    );
+    let outcome;
+    try {
+      outcome = await agent.repair({
+        kind: "ci-failure",
+        cwd: input.cwd,
+        config: input.config,
+        runId: input.runId,
+        issue: node.issue,
+        relatedIssues: node.relatedIssues,
+        prNumber: node.pr.number,
+        branch: repairBranch,
+        baseBranch: node.pr.headRefName,
+        checkEvidence: evidence,
+        runtime,
+      });
+    } catch (error) {
+      if (
+        error instanceof AgentInfrastructureError ||
+        error instanceof AgentExecutionError ||
+        error instanceof AgentOutputError
+      ) {
+        await releaseRepairAttemptKeys(repairAttempts, claimedAttemptKeys);
+      }
+      throw error;
+    }
 
     if (outcome.commits.length === 0) {
       await postUnresolvedCiRepairComment(
@@ -349,9 +380,42 @@ async function repairCiFailure(
       );
     }
     if (!validChangedPathsReport(outcome.structuredOutput)) {
+      await releaseRepairAttemptKeys(repairAttempts, claimedAttemptKeys);
       throw new Error(
         `PR #${node.pr.number} CI repair did not return a valid changedPaths report.`
       );
+    }
+    const changedPaths = reportedChangedPaths(outcome.structuredOutput);
+    const gateSensitivePaths = changedPaths.filter(isGateSensitivePath);
+    if (gateSensitivePaths.length > 0) {
+      const originalDiff = await deps.github.getPullRequestDiff(
+        input.config.repo,
+        node.pr.number
+      );
+      if (
+        !ciEditsAuthorized(
+          originalDiff,
+          node.issue?.title ?? "",
+          node.issue?.body ?? ""
+        )
+      ) {
+        await releaseRepairAttemptKeys(repairAttempts, claimedAttemptKeys);
+        throw new Error(
+          `PR #${node.pr.number} CI repair attempted gate-sensitive edits outside the linked scope: ${gateSensitivePaths.join(", ")}.`
+        );
+      }
+      if (typeof deps.git.diffBetween === "function") {
+        const repairDiff = await deps.git.diffBetween(
+          node.pr.headRefOid,
+          outcome.commits.at(-1) as string
+        );
+        if (containsGateWeakening(repairDiff)) {
+          await releaseRepairAttemptKeys(repairAttempts, claimedAttemptKeys);
+          throw new Error(
+            `PR #${node.pr.number} CI repair attempted to weaken or skip authoritative verification.`
+          );
+        }
+      }
     }
 
     const repairedCommit = outcome.commits.at(-1) as string;
@@ -369,6 +433,9 @@ async function repairCiFailure(
       runtime: repairedRuntime,
     });
     if (verificationResult.status !== "passed") {
+      if (verificationResult.status === "infra_failed") {
+        await releaseRepairAttemptKeys(repairAttempts, claimedAttemptKeys);
+      }
       throw new Error(
         `PR #${node.pr.number} CI repair failed host verification: ${verificationSummary(
           verificationResult
@@ -385,32 +452,36 @@ async function repairCiFailure(
         `PR #${node.pr.number} changed while CI repair was running; verified commit was not pushed.`
       );
     }
-    await deps.git.pushVerifiedCommit({
+    await deps.git.pushAdditiveCommit({
       branch: node.pr.headRefName,
       commit: repairedCommit,
       expectedRemoteSha: node.pr.headRefOid,
     });
     await waitForPullRequestHead(input, deps, node.pr.number, repairedCommit);
+    const requiredCheckNames = await deps.github.getRequiredCheckNames(
+      input.config.repo,
+      node.pr.baseRefName
+    );
     const checked = await deps.github.waitForPullRequestChecks(
       input.config.repo,
       node.pr.number,
-      CHECK_WAIT_TIMEOUT_MS,
-      CHECK_WAIT_INTERVAL_MS
+      input.config.validation.checkCompletionTimeoutMs,
+      CHECK_WAIT_INTERVAL_MS,
+      {
+        headRefOid: repairedCommit,
+        expectedCheckNames: [
+          ...new Set([
+            ...requiredCheckNames,
+            ...evidence.map((check) => check.name),
+          ]),
+        ],
+        startTimeoutMs: input.config.validation.checkStartTimeoutMs,
+      }
     );
     const checkedStatus = pullRequestCheckStatus(checked);
     if (checkedStatus.failed.length > 0) {
-      await postUnresolvedCiRepairComment(
-        input,
-        deps,
-        checked,
-        await deps.github.getPullRequestCheckEvidence(
-          input.config.repo,
-          checked
-        ),
-        outcome
-      );
-      throw new Error(
-        `PR #${node.pr.number} still has ${checkedStatus.failed.length} failing status check(s) after CI repair.`
+      deps.log?.(
+        `PR #${node.pr.number} has ${checkedStatus.failed.length} failing status check(s) on repaired head ${shortSha(repairedCommit)}; refreshing evidence for the next bounded round`
       );
     }
 
@@ -418,6 +489,43 @@ async function repairCiFailure(
   } finally {
     await deps.git.deleteLocalBranch(repairBranch);
   }
+}
+
+async function claimRepairAttemptKeys(
+  store: RepairAttemptStore,
+  keys: readonly string[]
+): Promise<readonly string[] | undefined> {
+  const claimed: string[] = [];
+  for (const key of keys) {
+    if (await store.claim(key)) {
+      claimed.push(key);
+      continue;
+    }
+    await releaseRepairAttemptKeys(store, claimed);
+    return undefined;
+  }
+  return claimed;
+}
+
+async function claimRepairAttemptSlot(
+  store: RepairAttemptStore,
+  keys: readonly string[]
+): Promise<readonly string[] | undefined> {
+  for (let slot = 1; slot <= 2; slot += 1) {
+    const claimed = await claimRepairAttemptKeys(
+      store,
+      keys.map((key) => `${key}:candidate-${slot}`)
+    );
+    if (claimed) return claimed;
+  }
+  return undefined;
+}
+
+async function releaseRepairAttemptKeys(
+  store: RepairAttemptStore,
+  keys: readonly string[]
+): Promise<void> {
+  await Promise.all(keys.map((key) => store.release(key)));
 }
 
 async function waitForPullRequestHead(
@@ -489,7 +597,7 @@ async function repairMergeState(
     await deps.github.waitForPullRequestChecks(
       input.config.repo,
       node.pr.number,
-      CHECK_WAIT_TIMEOUT_MS,
+      input.config.validation.checkCompletionTimeoutMs,
       CHECK_WAIT_INTERVAL_MS
     );
     return loadCurrentGraph(input, deps);
@@ -501,7 +609,7 @@ async function repairMergeState(
     deps,
     node.pr
   );
-  const repairBranch = `agent-train/repair/merge-${node.pr.number}-${safeRunId(
+  const repairBranch = `prtisan/repair/merge-${node.pr.number}-${safeRunId(
     input.runId
   )}`;
   await deps.git.prepareBranchAt(repairBranch, node.pr.headRefOid);
@@ -565,7 +673,7 @@ async function repairMergeState(
         `PR #${node.pr.number} changed during merge-state repair; verified commit was not pushed.`
       );
     }
-    await deps.git.pushVerifiedCommit({
+    await deps.git.pushAdditiveCommit({
       branch: node.pr.headRefName,
       commit: repairedCommit,
       expectedRemoteSha: node.pr.headRefOid,
@@ -574,8 +682,15 @@ async function repairMergeState(
     await deps.github.waitForPullRequestChecks(
       input.config.repo,
       node.pr.number,
-      CHECK_WAIT_TIMEOUT_MS,
-      CHECK_WAIT_INTERVAL_MS
+      input.config.validation.checkCompletionTimeoutMs,
+      CHECK_WAIT_INTERVAL_MS,
+      {
+        headRefOid: repairedCommit,
+        expectedCheckNames: pullRequestCheckStatus(node.pr)
+          .failed.concat(pullRequestCheckStatus(node.pr).successful)
+          .map((check) => check.name),
+        startTimeoutMs: input.config.validation.checkStartTimeoutMs,
+      }
     );
     return loadCurrentGraph(input, deps);
   } finally {
@@ -686,11 +801,11 @@ function validationNeedsCoordinatorCheck(node: OpenPrNode): boolean {
 function validationBlockers(node: OpenPrNode): string[] {
   const validation = node.validation;
   if (validation.state === "missing") {
-    return [`PR #${node.pr.number} has no agent-train validation review yet.`];
+    return [`PR #${node.pr.number} has no current Prtisan validation result.`];
   }
   if (validation.state === "stale") {
     return [
-      `PR #${node.pr.number} has no current agent-train validation review for head ${shortSha(node.pr.headRefOid)}.`,
+      `PR #${node.pr.number} has no current Prtisan validation result for head ${shortSha(node.pr.headRefOid)}.`,
     ];
   }
   if (validation.state === "blocked") {
@@ -794,7 +909,7 @@ function unresolvedCiRepairComment(input: {
   readonly outcome?: AgentRunOutcome;
 }): string {
   const lines = [
-    "Agent train could not make CI green for this PR.",
+    "Prtisan could not make CI green for this PR.",
     "",
     "Failed checks:",
     ...input.failedChecks.map(
@@ -831,6 +946,22 @@ function verificationSummary(
     : result.status;
 }
 
+function formatCheckFailureSummary(
+  evidence: readonly PullRequestCheckEvidence[]
+): string {
+  return evidence
+    .map((check) => {
+      const excerpt = check.logExcerpt
+        ?.replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 240);
+      return `${check.name} (${check.conclusion ?? check.status})${
+        excerpt ? ` — ${excerpt}` : ""
+      }`;
+    })
+    .join("; ");
+}
+
 function safeRunId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 48);
 }
@@ -858,4 +989,53 @@ function headMatchesExpected(
 
 function shortSha(value: string): string {
   return value.slice(0, 7);
+}
+
+function reportedChangedPaths(value: unknown): string[] {
+  if (typeof value !== "object" || value === null) return [];
+  const paths = (value as { changedPaths?: unknown }).changedPaths;
+  return Array.isArray(paths)
+    ? paths.filter((path): path is string => typeof path === "string")
+    : [];
+}
+
+function isGateSensitivePath(path: string): boolean {
+  return (
+    path.startsWith(".github/workflows/") ||
+    path === "package.json" ||
+    /(?:^|\/)(?:scripts?|ci)\/.*\.(?:sh|bash|js|mjs|cjs|ts|py)$/.test(path)
+  );
+}
+
+function ciEditsAuthorized(
+  originalDiff: string,
+  issueTitle: string,
+  issueBody: string
+): boolean {
+  return (
+    /^diff --git a\/(?:\.github\/workflows\/|package\.json|(?:.*\/)?(?:scripts?|ci)\/)/m.test(
+      originalDiff
+    ) ||
+    /\b(?:ci|continuous integration|workflow|github actions)\b/i.test(
+      `${issueTitle}\n${issueBody}`
+    )
+  );
+}
+
+function containsGateWeakening(diff: string): boolean {
+  const additions = diff
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+  return (
+    /continue-on-error\s*:\s*true/i.test(additions) ||
+    /(?:\|\|\s*true|exit\s+0)/i.test(additions) ||
+    /(?:CI|GITHUB_ACTIONS).{0,160}(?:skip|skipping).{0,160}(?:docker|test|e2e|check)/is.test(
+      additions
+    ) ||
+    /(?:docker|test|e2e|check).{0,160}(?:skip|skipping).{0,160}(?:CI|GITHUB_ACTIONS)/is.test(
+      additions
+    )
+  );
 }

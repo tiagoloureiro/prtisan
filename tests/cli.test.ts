@@ -2,71 +2,65 @@ import { describe, expect, test } from "bun:test";
 
 import { main, parseCliArgs } from "@/cli.js";
 
-describe("CLI parsing", () => {
-  test("rejects train ids", () => {
-    expect(() => parseCliArgs(["validate", "--train-id", "abc"])).toThrow(
-      "Unknown option: --train-id"
+describe("Prtisan CLI", () => {
+  test("parses the plan/apply/status/export interface", () => {
+    expect(parseCliArgs(["plan", "--cwd", "/repo"])).toEqual({
+      command: "plan",
+      cwd: "/repo",
+      help: false,
+    });
+    expect(parseCliArgs(["apply", "plan-123"])).toMatchObject({
+      command: "apply",
+      id: "plan-123",
+    });
+    expect(parseCliArgs(["status", "plan-123"])).toMatchObject({
+      command: "status",
+      id: "plan-123",
+    });
+    expect(parseCliArgs(["export", "plan-123"])).toMatchObject({
+      command: "export",
+      id: "plan-123",
+    });
+  });
+
+  test("parses two-phase repository onboarding", () => {
+    expect(parseCliArgs(["init", "plan", "--cwd", "/repo"])).toMatchObject({
+      command: "init",
+      action: "plan",
+      cwd: "/repo",
+    });
+    expect(parseCliArgs(["init", "apply", "setup-123"])).toMatchObject({
+      command: "init",
+      action: "apply",
+      id: "setup-123",
+    });
+  });
+
+  test("rejects removed mutating commands and missing plan ids", () => {
+    expect(() => parseCliArgs(["merge"])).toThrow("Unknown command: merge");
+    expect(() => parseCliArgs(["validate"])).toThrow(
+      "Unknown command: validate"
+    );
+    expect(() => parseCliArgs(["tui"])).toThrow("Unknown command: tui");
+    expect(() => parseCliArgs(["apply"])).toThrow("apply requires a value");
+    expect(() => parseCliArgs(["init", "apply"])).toThrow(
+      "init apply requires a value"
     );
   });
 
-  test("accepts GitHub-native validate command without state selectors", () => {
-    expect(parseCliArgs(["validate", "--repo", "o/r"])).toMatchObject({
-      command: "validate",
-      options: {
-        repo: "o/r",
-        repair: true,
-      },
-    });
-  });
-
-  test("supports explicit validation scope and rejects unknown scopes", () => {
-    expect(
-      parseCliArgs(["validate", "--repo", "o/r", "--scope", "issues"])
-    ).toMatchObject({
-      command: "validate",
-      options: { scope: "issues" },
-    });
-    expect(() => parseCliArgs(["validate", "--scope", "everything"])).toThrow(
-      "--scope must be one of prs, issues, or all"
-    );
-  });
-
-  test("accepts the TUI command with shared repo options", () => {
-    expect(
-      parseCliArgs([
-        "tui",
-        "--cwd",
-        "/repo",
-        "--repo",
-        "o/r",
-        "--config",
-        "agent-train.json",
-        "--target-branch",
-        "trunk",
-      ])
-    ).toMatchObject({
-      command: "tui",
-      options: {
-        cwd: "/repo",
-        repo: "o/r",
-        config: "agent-train.json",
-        targetBranch: "trunk",
-      },
-    });
-  });
-
-  test("includes the TUI command in help", async () => {
+  test("publishes only the new interface in help", async () => {
     const output: string[] = [];
     const originalLog = console.log;
     console.log = (...values: unknown[]) => {
       output.push(values.map(String).join(" "));
     };
     try {
-      expect(await main(["tui", "--help"])).toBe(0);
+      expect(await main(["--help"])).toBe(0);
     } finally {
       console.log = originalLog;
     }
-
-    expect(output.join("\n")).toContain("agent-train tui");
+    expect(output.join("\n")).toContain("prtisan apply <plan-id>");
+    expect(output.join("\n")).not.toContain("prtisan merge");
+    expect(output.join("\n")).not.toContain("agent-train");
   });
 });

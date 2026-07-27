@@ -56,6 +56,9 @@ export interface AgentTrainConfig {
   };
   readonly docker: {
     readonly imageName: string;
+    readonly imagePolicy: "managed" | "external";
+    readonly dockerfile: string;
+    readonly context: string;
     readonly codexHome: string;
     readonly cpus?: number;
     readonly mounts: readonly DockerMountConfig[];
@@ -74,6 +77,8 @@ export interface AgentTrainConfig {
     readonly promptCharBudget: number;
     readonly maxCheckLogChars: number;
     readonly maxCheckEvidenceChars: number;
+    readonly checkStartTimeoutMs: number;
+    readonly checkCompletionTimeoutMs: number;
     readonly leaseTtlMs: number;
     readonly cacheTtlDays: number;
   };
@@ -103,6 +108,7 @@ export interface PullRequest {
   readonly closingIssuesReferences: readonly IssueRef[];
   readonly latestReviews: readonly PullRequestReviewSummary[];
   readonly reviews: readonly PullRequestReviewSummary[];
+  readonly comments: readonly PullRequestReviewSummary[];
   readonly statusCheckRollup?: readonly unknown[];
 }
 
