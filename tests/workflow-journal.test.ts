@@ -36,8 +36,23 @@ describe("SQLite workflow journal", () => {
       { state: "MERGED" },
       plan.createdAt
     );
+    const newerPlan = {
+      ...plan,
+      id: "plan-newer",
+      createdAt: "2026-07-27T00:02:00.000Z",
+      planDigest: "newer-digest",
+    };
+    await journal.savePlan(newerPlan, {
+      type: "plan_created",
+      at: newerPlan.createdAt,
+      planId: newerPlan.id,
+      repositoryKey: newerPlan.repositoryKey,
+      pullRequests: [],
+    });
 
     expect((await journal.snapshot(plan.id))?.outcome).toBe("running");
+    expect((await journal.latestPlan("repo"))?.id).toBe("plan-newer");
+    expect(await journal.latestPlan("another-repo")).toBeUndefined();
     expect(await journal.effect(plan.id, "merge:1:head")).toMatchObject({
       status: "completed",
       result: { state: "MERGED" },

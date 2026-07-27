@@ -65,20 +65,29 @@ export async function createSetupBranchChange(
         ["add", ".prtisan/manifest.json", ".prtisan/Dockerfile"],
         { cwd: tempRoot }
       );
-      await mustRun(runner, "git", ["commit", "-m", "Configure Prtisan"], {
-        cwd: tempRoot,
-      });
-      await mustRun(
-        runner,
-        "git",
-        [
-          "push",
-          input.remote,
-          `HEAD:refs/heads/${input.branch}`,
-          "--force-with-lease",
-        ],
-        { cwd: tempRoot }
-      );
+      const alreadyPublished =
+        branchExists &&
+        (await managedFilesMatchBranch(
+          runner,
+          tempRoot,
+          `${input.remote}/${input.branch}`
+        ));
+      if (!alreadyPublished) {
+        await mustRun(runner, "git", ["commit", "-m", "Configure Prtisan"], {
+          cwd: tempRoot,
+        });
+        await mustRun(
+          runner,
+          "git",
+          [
+            "push",
+            input.remote,
+            `HEAD:refs/heads/${input.branch}`,
+            "--force-with-lease",
+          ],
+          { cwd: tempRoot }
+        );
+      }
     }
 
     return { scaffold, changed };
@@ -126,4 +135,30 @@ async function hasGitChanges(
     cwd,
   });
   return result.stdout.trim().length > 0;
+}
+
+async function managedFilesMatchBranch(
+  runner: CommandRunner,
+  cwd: string,
+  branch: string
+): Promise<boolean> {
+  const result = await runner.run(
+    "git",
+    [
+      "diff",
+      "--cached",
+      "--quiet",
+      branch,
+      "--",
+      ".prtisan/manifest.json",
+      ".prtisan/Dockerfile",
+    ],
+    { cwd }
+  );
+  if (result.exitCode > 1) {
+    throw new Error(
+      `Unable to compare the setup branch: ${result.stderr || result.stdout}`
+    );
+  }
+  return result.exitCode === 0;
 }

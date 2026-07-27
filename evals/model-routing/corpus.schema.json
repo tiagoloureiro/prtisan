@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tiagoloureiro/prtisan/evals/model-routing/corpus.schema.json",
+  "title": "Prtisan model-routing corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "frozenAt",
+    "goldFrozenAt",
+    "authoredBy",
+    "pins",
+    "cases"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "frozenAt": { "type": "string", "format": "date-time" },
+    "goldFrozenAt": { "type": "string", "format": "date-time" },
+    "authoredBy": { "type": "string", "minLength": 1 },
+    "pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "promptDigest",
+        "toolDigest",
+        "dockerImage",
+        "codeReviewSkillDigest",
+        "runtimeDigest",
+        "verificationDigest"
+      ],
+      "properties": {
+        "promptDigest": { "$ref": "#/$defs/digest" },
+        "toolDigest": { "$ref": "#/$defs/digest" },
+        "dockerImage": { "type": "string", "minLength": 1 },
+        "codeReviewSkillDigest": { "$ref": "#/$defs/digest" },
+        "runtimeDigest": { "$ref": "#/$defs/digest" },
+        "verificationDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 105,
+      "maxItems": 105,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "minLength": 16 },
+    "profileRole": {
+      "enum": [
+        "standardsReview",
+        "specReview",
+        "repairVerification",
+        "validationRepair",
+        "ciRepair",
+        "mergeStateRepair",
+        "restackConflictRepair"
+      ]
+    },
+    "repository": {
+      "enum": ["prtisan", "titally", "titance", "titect", "titrain"]
+    },
+    "matcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string" },
+        "titlePattern": { "type": "string" },
+        "bodyPattern": { "type": "string" },
+        "rulePattern": { "type": "string" },
+        "evidencePattern": { "type": "string" }
+      },
+      "minProperties": 1
+    },
+    "goldFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "matcher", "attribution"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["blocking", "advisory"] },
+        "critical": { "type": "boolean", "default": false },
+        "matcher": { "$ref": "#/$defs/matcher" },
+        "attribution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceRequired", "ruleOrContractRequired"],
+          "properties": {
+            "evidenceRequired": { "type": "boolean" },
+            "ruleOrContractRequired": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "repository",
+        "role",
+        "split",
+        "source",
+        "execution",
+        "gold"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "repository": { "$ref": "#/$defs/repository" },
+        "role": { "$ref": "#/$defs/profileRole" },
+        "split": { "enum": ["screening", "holdout"] },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "commit"],
+          "properties": {
+            "kind": { "enum": ["historical", "seeded"] },
+            "commit": { "type": "string", "minLength": 7 },
+            "patchDigest": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repositoryPath",
+            "baseRef",
+            "headRef",
+            "config",
+            "task"
+          ],
+          "properties": {
+            "repositoryPath": { "type": "string", "minLength": 1 },
+            "baseRef": { "type": "string", "minLength": 1 },
+            "headRef": { "type": "string", "minLength": 1 },
+            "config": { "type": "object" },
+            "task": { "type": "object" },
+            "mutationChecks": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "intendedCauseCommand",
+                "verificationCommands",
+                "allowedPathPatterns",
+                "gateIntegrityCommand"
+              ],
+              "properties": {
+                "intendedCauseCommand": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "verificationCommands": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "allowedPathPatterns": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "gateIntegrityCommand": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        "gold": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "findings"],
+              "properties": {
+                "kind": { "const": "review" },
+                "findings": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/goldFinding" }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind", "originalFindingIds", "resolvedFindingIds"],
+              "properties": {
+                "kind": { "const": "repairVerification" },
+                "originalFindingIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string" }
+                },
+                "resolvedFindingIds": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "criticalFindingIds": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "newBlockers": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/goldFinding" }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": ["kind", "intendedCause"],
+              "properties": {
+                "kind": { "const": "mutation" },
+                "intendedCause": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

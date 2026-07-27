@@ -38,7 +38,7 @@ describe("Prtisan setup scaffold", () => {
       `${root}/.prtisan/manifest.json`
     );
     expect(manifest).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       targetBranch: "main",
       sandbox: {
         provider: "docker",
@@ -46,6 +46,14 @@ describe("Prtisan setup scaffold", () => {
       },
       verification: {
         bootstrap: { command: "pnpm install --frozen-lockfile" },
+      },
+      codex: {
+        roles: {
+          standardsReview: {
+            model: "gpt-5.6-sol",
+            reasoningEffort: "medium",
+          },
+        },
       },
     });
     expect(

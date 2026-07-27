@@ -1,19 +1,21 @@
 import { z } from "zod";
 
 import { pathExists, readJson } from "./fs.js";
+import { defaultAgentProfiles } from "./manifest.js";
 import { resolvePath } from "./path.js";
-import type { AgentTrainConfig } from "./types.js";
+import { AGENT_ROLES, type AgentTrainConfig } from "./types.js";
 
 const ReasoningSchema = z.enum(["low", "medium", "high", "xhigh"]);
 const SessionPolicySchema = z.enum(["none", "failures", "all"]);
-const DEFAULT_MODELS = {
-  repair: "gpt-5.6-sol",
-  review: "gpt-5.6-sol",
-};
-const DEFAULT_REASONING = {
-  repair: "medium",
-  review: "low",
-} satisfies AgentTrainConfig["reasoning"];
+const ModelProfileSchema = z.object({
+  model: z.string().min(1),
+  reasoningEffort: ReasoningSchema,
+});
+const AgentProfilesSchema = z.object(
+  Object.fromEntries(
+    AGENT_ROLES.map((role) => [role, ModelProfileSchema])
+  ) as Record<(typeof AGENT_ROLES)[number], typeof ModelProfileSchema>
+);
 const DEFAULT_CONCURRENCY = {
   validate: 4,
   github: 4,
@@ -65,163 +67,155 @@ const SandboxCommandSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
 });
 
-const ConfigSchema = z.object({
-  repo: z.string().min(1),
-  targetBranch: z.string().min(1).default("main"),
-  remote: z.string().min(1).default("origin"),
-  models: z
-    .object({
-      repair: z.string().min(1).default(DEFAULT_MODELS.repair),
-      review: z.string().min(1).default(DEFAULT_MODELS.review),
-    })
-    .default(DEFAULT_MODELS),
-  reasoning: z
-    .object({
-      repair: ReasoningSchema.default(DEFAULT_REASONING.repair),
-      review: ReasoningSchema.default(DEFAULT_REASONING.review),
-    })
-    .default(DEFAULT_REASONING),
-  concurrency: z
-    .object({
-      validate: z
-        .number()
-        .int()
-        .positive()
-        .max(32)
-        .default(DEFAULT_CONCURRENCY.validate),
-      github: z
-        .number()
-        .int()
-        .positive()
-        .max(16)
-        .default(DEFAULT_CONCURRENCY.github),
-    })
-    .default(DEFAULT_CONCURRENCY),
-  docker: z
-    .object({
-      imageName: z.string().min(1).default(DEFAULT_DOCKER.imageName),
-      imagePolicy: z
-        .enum(["managed", "external"])
-        .default(DEFAULT_DOCKER.imagePolicy),
-      dockerfile: z.string().min(1).default(DEFAULT_DOCKER.dockerfile),
-      context: z.string().min(1).default(DEFAULT_DOCKER.context),
-      codexHome: z.string().min(1).default(DEFAULT_DOCKER.codexHome),
-      cpus: z.number().positive().optional(),
-      mounts: z
-        .array(
-          z.object({
-            hostPath: z.string().min(1),
-            sandboxPath: z.string().min(1),
-            readonly: z.boolean().optional(),
-          })
-        )
-        .default([]),
-    })
-    .default(DEFAULT_DOCKER),
-  runtime: z
-    .object({
-      autoProvision: z.boolean().default(DEFAULT_RUNTIME.autoProvision),
-      verificationMode: z
-        .enum(["auto", "explicit"])
-        .default(DEFAULT_RUNTIME.verificationMode),
-      probes: z.array(SandboxCommandSchema).default([]),
-      bootstrap: SandboxCommandSchema.optional(),
-      verification: z.array(SandboxCommandSchema).default([]),
-    })
-    .default(DEFAULT_RUNTIME),
-  validation: z
-    .object({
-      maxRepairRounds: z
-        .number()
-        .int()
-        .min(0)
-        .max(DEFAULT_VALIDATION.maxRepairRounds)
-        .default(DEFAULT_VALIDATION.maxRepairRounds),
-      maxAgentRunsPerHead: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.maxAgentRunsPerHead)
-        .default(DEFAULT_VALIDATION.maxAgentRunsPerHead),
-      maxWallTimeMs: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.maxWallTimeMs)
-        .default(DEFAULT_VALIDATION.maxWallTimeMs),
-      promptCharBudget: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.promptCharBudget)
-        .default(DEFAULT_VALIDATION.promptCharBudget),
-      maxCheckLogChars: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.maxCheckLogChars)
-        .default(DEFAULT_VALIDATION.maxCheckLogChars),
-      maxCheckEvidenceChars: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.maxCheckEvidenceChars)
-        .default(DEFAULT_VALIDATION.maxCheckEvidenceChars),
-      checkStartTimeoutMs: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.checkStartTimeoutMs)
-        .default(DEFAULT_VALIDATION.checkStartTimeoutMs),
-      checkCompletionTimeoutMs: z
-        .number()
-        .int()
-        .positive()
-        .max(DEFAULT_VALIDATION.checkCompletionTimeoutMs)
-        .default(DEFAULT_VALIDATION.checkCompletionTimeoutMs),
-      leaseTtlMs: z
-        .number()
-        .int()
-        .positive()
-        .default(DEFAULT_VALIDATION.leaseTtlMs),
-      cacheTtlDays: z
-        .number()
-        .int()
-        .positive()
-        .default(DEFAULT_VALIDATION.cacheTtlDays),
-    })
-    .default(DEFAULT_VALIDATION),
-  retention: z
-    .object({
-      ttlDays: z.number().int().positive().default(DEFAULT_RETENTION.ttlDays),
-      maxLogBytes: z
-        .number()
-        .int()
-        .positive()
-        .default(DEFAULT_RETENTION.maxLogBytes),
-      keepSessions: z.boolean().optional(),
-      sessionPolicy: SessionPolicySchema.optional(),
-      maxRuns: z.number().int().positive().default(DEFAULT_RETENTION.maxRuns),
-      maxTotalBytes: z
-        .number()
-        .int()
-        .positive()
-        .default(DEFAULT_RETENTION.maxTotalBytes),
-    })
-    .default(DEFAULT_RETENTION)
-    .transform((value) => {
-      const sessionPolicy =
-        value.sessionPolicy ??
-        (value.keepSessions === false
-          ? "none"
-          : DEFAULT_RETENTION.sessionPolicy);
-      return {
-        ...value,
-        keepSessions: sessionPolicy !== "none",
-        sessionPolicy,
-      };
-    }),
-});
+const ConfigSchema = z
+  .object({
+    repo: z.string().min(1),
+    targetBranch: z.string().min(1).default("main"),
+    remote: z.string().min(1).default("origin"),
+    agentProfiles: AgentProfilesSchema.default(defaultAgentProfiles()),
+    concurrency: z
+      .object({
+        validate: z
+          .number()
+          .int()
+          .positive()
+          .max(32)
+          .default(DEFAULT_CONCURRENCY.validate),
+        github: z
+          .number()
+          .int()
+          .positive()
+          .max(16)
+          .default(DEFAULT_CONCURRENCY.github),
+      })
+      .default(DEFAULT_CONCURRENCY),
+    docker: z
+      .object({
+        imageName: z.string().min(1).default(DEFAULT_DOCKER.imageName),
+        imagePolicy: z
+          .enum(["managed", "external"])
+          .default(DEFAULT_DOCKER.imagePolicy),
+        dockerfile: z.string().min(1).default(DEFAULT_DOCKER.dockerfile),
+        context: z.string().min(1).default(DEFAULT_DOCKER.context),
+        codexHome: z.string().min(1).default(DEFAULT_DOCKER.codexHome),
+        cpus: z.number().positive().optional(),
+        mounts: z
+          .array(
+            z.object({
+              hostPath: z.string().min(1),
+              sandboxPath: z.string().min(1),
+              readonly: z.boolean().optional(),
+            })
+          )
+          .default([]),
+      })
+      .default(DEFAULT_DOCKER),
+    runtime: z
+      .object({
+        autoProvision: z.boolean().default(DEFAULT_RUNTIME.autoProvision),
+        verificationMode: z
+          .enum(["auto", "explicit"])
+          .default(DEFAULT_RUNTIME.verificationMode),
+        probes: z.array(SandboxCommandSchema).default([]),
+        bootstrap: SandboxCommandSchema.optional(),
+        verification: z.array(SandboxCommandSchema).default([]),
+      })
+      .default(DEFAULT_RUNTIME),
+    validation: z
+      .object({
+        maxRepairRounds: z
+          .number()
+          .int()
+          .min(0)
+          .max(DEFAULT_VALIDATION.maxRepairRounds)
+          .default(DEFAULT_VALIDATION.maxRepairRounds),
+        maxAgentRunsPerHead: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.maxAgentRunsPerHead)
+          .default(DEFAULT_VALIDATION.maxAgentRunsPerHead),
+        maxWallTimeMs: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.maxWallTimeMs)
+          .default(DEFAULT_VALIDATION.maxWallTimeMs),
+        promptCharBudget: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.promptCharBudget)
+          .default(DEFAULT_VALIDATION.promptCharBudget),
+        maxCheckLogChars: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.maxCheckLogChars)
+          .default(DEFAULT_VALIDATION.maxCheckLogChars),
+        maxCheckEvidenceChars: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.maxCheckEvidenceChars)
+          .default(DEFAULT_VALIDATION.maxCheckEvidenceChars),
+        checkStartTimeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.checkStartTimeoutMs)
+          .default(DEFAULT_VALIDATION.checkStartTimeoutMs),
+        checkCompletionTimeoutMs: z
+          .number()
+          .int()
+          .positive()
+          .max(DEFAULT_VALIDATION.checkCompletionTimeoutMs)
+          .default(DEFAULT_VALIDATION.checkCompletionTimeoutMs),
+        leaseTtlMs: z
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_VALIDATION.leaseTtlMs),
+        cacheTtlDays: z
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_VALIDATION.cacheTtlDays),
+      })
+      .default(DEFAULT_VALIDATION),
+    retention: z
+      .object({
+        ttlDays: z.number().int().positive().default(DEFAULT_RETENTION.ttlDays),
+        maxLogBytes: z
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_RETENTION.maxLogBytes),
+        keepSessions: z.boolean().optional(),
+        sessionPolicy: SessionPolicySchema.optional(),
+        maxRuns: z.number().int().positive().default(DEFAULT_RETENTION.maxRuns),
+        maxTotalBytes: z
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_RETENTION.maxTotalBytes),
+      })
+      .default(DEFAULT_RETENTION)
+      .transform((value) => {
+        const sessionPolicy =
+          value.sessionPolicy ??
+          (value.keepSessions === false
+            ? "none"
+            : DEFAULT_RETENTION.sessionPolicy);
+        return {
+          ...value,
+          keepSessions: sessionPolicy !== "none",
+          sessionPolicy,
+        };
+      }),
+  })
+  .strict()
+  .transform((config): AgentTrainConfig => config);
 
 export const DEFAULT_CONFIG_PATH = ".prtisan/legacy-config.json";
 
@@ -238,8 +232,7 @@ export function defaultConfig(input: {
     repo: input.repo,
     targetBranch: input.targetBranch,
     remote: "origin",
-    models: { ...DEFAULT_MODELS },
-    reasoning: { ...DEFAULT_REASONING },
+    agentProfiles: defaultAgentProfiles(),
     concurrency: { ...DEFAULT_CONCURRENCY },
     docker: {
       ...DEFAULT_DOCKER,

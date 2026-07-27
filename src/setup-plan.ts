@@ -2,7 +2,11 @@ import { Database } from "bun:sqlite";
 
 import type { CommandRunner } from "./exec.js";
 import { ensureDir } from "./fs.js";
-import type { defaultManifest } from "./manifest.js";
+import {
+  type defaultManifest,
+  manifestForSetup,
+  PRTISAN_MANIFEST_PATH,
+} from "./manifest.js";
 import { dirname } from "./path.js";
 import { recommendedManifest } from "./scaffold.js";
 import { stableDigest } from "./validation-hardening.js";
@@ -17,6 +21,7 @@ export interface SetupPlan {
   readonly targetHead: string;
   readonly branch: "prtisan/setup";
   readonly createdAt: string;
+  readonly upgrade: boolean;
   readonly proposedManifest: ReturnType<typeof defaultManifest>;
 }
 
@@ -110,6 +115,20 @@ export async function createSetupPlan(input: {
     ["rev-parse", `origin/${targetBranch}`],
     { cwd }
   );
+  const existingManifest = await input.runner.run(
+    "git",
+    ["show", `origin/${targetBranch}:${PRTISAN_MANIFEST_PATH}`],
+    { cwd }
+  );
+  const upgrade =
+    existingManifest.exitCode === 0 &&
+    existingManifest.stdout.trim().length > 0;
+  const proposedManifest = upgrade
+    ? manifestForSetup(
+        existingManifest.stdout,
+        `origin/${targetBranch}:${PRTISAN_MANIFEST_PATH}`
+      )
+    : await recommendedManifest(cwd, targetBranch);
   const createdAt = (input.now ?? new Date()).toISOString();
   const value = {
     schemaVersion: 1 as const,
@@ -120,7 +139,8 @@ export async function createSetupPlan(input: {
     targetHead: head.stdout.trim(),
     branch: "prtisan/setup" as const,
     createdAt,
-    proposedManifest: await recommendedManifest(cwd, targetBranch),
+    upgrade,
+    proposedManifest,
   };
   const digest = stableDigest(value);
   return { ...value, id: `setup-${digest.slice(0, 16)}` };

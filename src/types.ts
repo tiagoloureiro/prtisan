@@ -22,6 +22,49 @@ export interface Issue {
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
+export const AGENT_ROLES = [
+  "standardsReview",
+  "specReview",
+  "repairVerification",
+  "validationRepair",
+  "ciRepair",
+  "mergeStateRepair",
+  "restackConflictRepair",
+] as const;
+
+export type AgentRole = (typeof AGENT_ROLES)[number];
+
+export interface ModelProfile {
+  readonly model: string;
+  readonly reasoningEffort: ReasoningEffort;
+}
+
+export type AgentRoleProfiles = Readonly<Record<AgentRole, ModelProfile>>;
+
+export interface TokenUsage {
+  readonly inputTokens: number;
+  readonly cacheCreationInputTokens: number;
+  readonly cacheReadInputTokens: number;
+  readonly outputTokens: number;
+}
+
+export interface CreditCost {
+  readonly rateCardId: string;
+  readonly credits: number;
+}
+
+export interface AgentInvocationMetrics {
+  readonly role: AgentRole;
+  readonly profile: ModelProfile;
+  readonly promptChars: number;
+  readonly agentDurationMs: number;
+  readonly iterations: number;
+  readonly retryCount: number;
+  readonly cacheUsed?: boolean;
+  readonly usage?: TokenUsage;
+  readonly creditCost?: CreditCost;
+}
+
 export interface DockerMountConfig {
   readonly hostPath: string;
   readonly sandboxPath: string;
@@ -42,14 +85,7 @@ export interface AgentTrainConfig {
   readonly repo: string;
   readonly targetBranch: string;
   readonly remote: string;
-  readonly models: {
-    readonly repair: string;
-    readonly review: string;
-  };
-  readonly reasoning: {
-    readonly repair: ReasoningEffort;
-    readonly review: ReasoningEffort;
-  };
+  readonly agentProfiles: AgentRoleProfiles;
   readonly concurrency: {
     readonly validate: number;
     readonly github: number;
@@ -155,6 +191,9 @@ export interface ReviewReport {
   readonly findings: readonly ReviewFinding[];
   readonly promptChars?: number;
   readonly durationMs?: number;
+  readonly invocation?: AgentInvocationMetrics;
+  readonly rawOutput?: string;
+  readonly logFilePath?: string;
 }
 
 export interface RepairVerificationReport {
@@ -163,6 +202,9 @@ export interface RepairVerificationReport {
   readonly findings: readonly ReviewFinding[];
   readonly promptChars?: number;
   readonly durationMs?: number;
+  readonly invocation?: AgentInvocationMetrics;
+  readonly rawOutput?: string;
+  readonly logFilePath?: string;
 }
 
 export interface AgentRunOutcome {
@@ -174,12 +216,8 @@ export interface AgentRunOutcome {
   readonly sessionId?: string;
   readonly promptChars?: number;
   readonly durationMs?: number;
-  readonly usage?: {
-    readonly inputTokens: number;
-    readonly cacheCreationInputTokens: number;
-    readonly cacheReadInputTokens: number;
-    readonly outputTokens: number;
-  };
+  readonly usage?: TokenUsage;
+  readonly invocation?: AgentInvocationMetrics;
 }
 
 export interface VerificationResult {

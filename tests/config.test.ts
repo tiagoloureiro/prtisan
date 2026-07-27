@@ -95,6 +95,19 @@ describe("validation configuration compatibility", () => {
 
     await expect(loadConfig(cwd, "config.json")).rejects.toThrow();
   });
+
+  test("rejects removed review/repair model buckets", async () => {
+    const cwd = await temporaryDirectory();
+    await writeFile(
+      join(cwd, "config.json"),
+      JSON.stringify({
+        repo: "o/r",
+        models: { review: "legacy", repair: "legacy" },
+      })
+    );
+
+    await expect(loadConfig(cwd, "config.json")).rejects.toThrow();
+  });
 });
 
 async function configDirectory(retention: Record<string, unknown>) {

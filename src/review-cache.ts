@@ -3,7 +3,12 @@ import { rename, unlink } from "node:fs/promises";
 import { ensureDir, pathExists, readJson, writeJson } from "./fs.js";
 import { joinPath } from "./path.js";
 import { prtisanRepositoryDataPath } from "./prtisan-paths.js";
-import type { ReviewAxis, ReviewReport } from "./types.js";
+import type {
+  AgentRole,
+  ModelProfile,
+  ReviewAxis,
+  ReviewReport,
+} from "./types.js";
 import { stableDigest } from "./validation-hardening.js";
 
 interface ReviewCacheRecord {
@@ -70,8 +75,8 @@ export class FileReviewCache implements ReviewCache {
 export function reviewCacheKey(input: {
   readonly snapshotKey: string;
   readonly axis: ReviewAxis;
-  readonly model: string;
-  readonly effort: string;
+  readonly role: AgentRole;
+  readonly profile: ModelProfile;
   readonly promptSchemaDigest: string;
 }): string {
   return stableDigest(input);

@@ -10,13 +10,17 @@ import {
 import { FileArtifactStore } from "./workflow/artifacts.js";
 import { SqliteWorkflowJournal } from "./workflow/journal.js";
 import { ProductionWorkflowEnvironment } from "./workflow/production.js";
-import { PrtisanWorkflow } from "./workflow/workflow.js";
+import {
+  PrtisanWorkflow,
+  type WorkflowRunResult,
+} from "./workflow/workflow.js";
 
 interface ParsedArgs {
-  readonly command?: "init" | "plan" | "apply" | "status" | "export";
+  readonly command?: "run" | "init" | "plan" | "apply" | "status" | "export";
   readonly action?: "plan" | "apply";
   readonly id?: string;
   readonly cwd?: string;
+  readonly json?: boolean;
   readonly help: boolean;
 }
 
@@ -27,7 +31,9 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
   if (!rawCommand || rawCommand === "--help" || rawCommand === "-h") {
     return { help: true };
   }
-  if (!["init", "plan", "apply", "status", "export"].includes(rawCommand)) {
+  if (
+    !["run", "init", "plan", "apply", "status", "export"].includes(rawCommand)
+  ) {
     throw new Error(`Unknown command: ${rawCommand}`);
   }
   const command = rawCommand as Command;
@@ -41,23 +47,36 @@ export function parseCliArgs(argv: readonly string[]): ParsedArgs {
     }
     action = rawAction;
     if (action === "apply") id = requireValue(rest, index++, "init apply");
-  } else if (command !== "plan") {
+  } else if (command !== "plan" && command !== "run") {
     id = requireValue(rest, index++, command);
   }
 
   let cwd: string | undefined;
+  let json = false;
   let help = false;
   while (index < rest.length) {
     const value = rest[index++] as string;
     if (value === "--cwd") {
       cwd = requireValue(rest, index++, "--cwd");
+    } else if (value === "--json") {
+      if (command !== "run") {
+        throw new Error("--json is only supported by run.");
+      }
+      json = true;
     } else if (value === "--help" || value === "-h") {
       help = true;
     } else {
       throw new Error(`Unknown option: ${value}`);
     }
   }
-  return { command, action, id, cwd, help };
+  return {
+    command,
+    action,
+    id,
+    cwd,
+    ...(json ? { json: true } : {}),
+    help,
+  };
 }
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
@@ -89,6 +108,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
           targetBranch: plan.targetBranch,
           branch: plan.branch,
           manifest: plan.proposedManifest,
+          force: plan.upgrade,
         },
         {
           runner,
@@ -110,6 +130,11 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
       new FileArtifactStore(paths.artifacts),
       new ProductionWorkflowEnvironment(runner)
     );
+    if (parsed.command === "run") {
+      const result = await workflow.run({ cwd });
+      console.log(formatRunResult(result, parsed.json));
+      return runExitCode(result);
+    }
     if (parsed.command === "plan") {
       printJson(await workflow.plan({ cwd }));
       return 0;
@@ -127,6 +152,64 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   } finally {
     journal.close();
   }
+}
+
+export function formatRunResult(
+  result: WorkflowRunResult,
+  json = false
+): string {
+  const resumeCommand = `prtisan run --cwd ${shellQuote(result.cwd)}`;
+  if (json) {
+    return JSON.stringify({ ...result, resumeCommand }, null, 2);
+  }
+
+  if (result.kind === "setup") {
+    return [
+      `Prtisan · ${result.repo}`,
+      `State: ${result.outcome}`,
+      `Setup: #${result.setupPr.number} ${result.setupPr.url}`,
+      `Blocker: ${result.blocker.message}`,
+      `Resume: ${resumeCommand}`,
+    ].join("\n");
+  }
+
+  const lines = [
+    `Prtisan · ${result.repo}`,
+    `Plan: ${result.planId}`,
+    `State: ${result.snapshot.outcome}`,
+    `Merged: ${
+      result.snapshot.merged.length > 0
+        ? result.snapshot.merged.map((number) => `#${number}`).join(", ")
+        : "none"
+    }`,
+  ];
+  if (result.snapshot.blocker) {
+    lines.push(`Blocker: ${result.snapshot.blocker.message}`);
+  } else {
+    lines.push(`Next: ${result.snapshot.nextAction}`);
+  }
+  if (result.snapshot.outcome !== "completed") {
+    lines.push(`Resume: ${resumeCommand}`);
+  }
+  return lines.join("\n");
+}
+
+export function runExitCode(result: WorkflowRunResult): number {
+  if (result.kind === "setup") return 2;
+  if (result.snapshot.outcome === "completed") return 0;
+  if (
+    result.snapshot.outcome === "infrastructure_failed" ||
+    result.snapshot.outcome === "invalid_plan"
+  ) {
+    return 1;
+  }
+  return 2;
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function requireValue(
@@ -149,6 +232,7 @@ function printHelp(): void {
   console.log(`prtisan
 
 Usage:
+  prtisan run [--cwd <repo>] [--json]
   prtisan init plan [--cwd <repo>]
   prtisan init apply <plan-id>
   prtisan plan [--cwd <repo>]

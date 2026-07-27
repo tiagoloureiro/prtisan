@@ -21,6 +21,7 @@ export interface JournalLease {
 export interface WorkflowJournal {
   savePlan(plan: TrainPlan, event: WorkflowEvent): Promise<void>;
   loadPlan(planId: string): Promise<TrainPlan | undefined>;
+  latestPlan(repositoryKey: string): Promise<TrainPlan | undefined>;
   append(planId: string, event: WorkflowEvent): Promise<void>;
   events(planId: string): Promise<readonly WorkflowEvent[]>;
   snapshot(planId: string): Promise<WorkflowSnapshot | undefined>;
@@ -85,6 +86,15 @@ export class SqliteWorkflowJournal implements WorkflowJournal {
         "SELECT plan_json FROM plans WHERE id = ?"
       )
       .get(planId);
+    return row ? (JSON.parse(row.plan_json) as TrainPlan) : undefined;
+  }
+
+  async latestPlan(repositoryKey: string): Promise<TrainPlan | undefined> {
+    const row = this.database
+      .query<{ plan_json: string }, [string]>(
+        "SELECT plan_json FROM plans WHERE repository_key = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+      )
+      .get(repositoryKey);
     return row ? (JSON.parse(row.plan_json) as TrainPlan) : undefined;
   }
 
@@ -244,6 +254,16 @@ export class InMemoryWorkflowJournal implements WorkflowJournal {
 
   async loadPlan(planId: string): Promise<TrainPlan | undefined> {
     return this.plans.get(planId);
+  }
+
+  async latestPlan(repositoryKey: string): Promise<TrainPlan | undefined> {
+    return [...this.plans.values()]
+      .filter((plan) => plan.repositoryKey === repositoryKey)
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.id.localeCompare(left.id)
+      )[0];
   }
 
   async append(planId: string, event: WorkflowEvent): Promise<void> {

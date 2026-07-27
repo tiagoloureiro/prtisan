@@ -1,27 +1,56 @@
-# Agent PR Train
+# Prtisan
 
 ## Language
 
-### Core concepts
+Prtisan: A local Bun TypeScript command-line tool that advances a complete open
+GitHub pull-request train through frozen planning, sandboxed verification,
+bounded repair, guarded squash merge, and direct-child restacking.
 
-Agent PR Train CLI: A local Bun TypeScript command-line tool that validates and merges a dependent set of GitHub pull requests. Avoid: "GitHub workflow" when that could mean GitHub Actions.
+Run: The primary one-command operation. It creates or reuses repository setup,
+selects the newest journaled plan, resumes durable work, or creates fresh
+authority after completion or staleness.
 
-Open PR graph: The live dependency graph derived from all open GitHub PRs, including drafts. It is rebuilt from GitHub every run.
+Plan: An immutable snapshot of the complete open PR graph and the authority used
+to judge it, including head/base SHAs, intent contracts, policy, checks, review
+state, runtime, and Codex configuration.
 
-Train: The ordered set of open PRs that should merge together. The train does not have a local id or state file; GitHub PRs, branches, reviews, checks, and linked issues are the source of truth.
+Attempt: A journaled validation and integration lifecycle for one PR snapshot.
+Repair counters belong to the attempt and survive process restarts.
 
-Setup scaffold: The minimal target-repository files needed before validation or merge can run: `.sandcastle/agent-train.config.json`, `.sandcastle/Dockerfile`, and gitignore rules for local auth, logs, and worktrees.
+Checkpoint: A durable non-success outcome with a blocker and exact next action.
+External checks, human approval, ambiguity, credentials, policy, and exhausted
+repair become checkpoints rather than speculative branch edits.
 
-Frontier: The set of PRs whose blocker PRs have already merged or are otherwise absent from the current open PR graph.
+Open PR graph: Every open GitHub PR, including drafts. Independent roots and
+single-parent stacks are valid; cycles and multi-parent joins are rejected.
 
-PR branch: The GitHub pull request head branch that Codex may validate, repair, rebase, and push.
+Setup PR: The human-reviewed `prtisan/setup` pull request that installs
+`.prtisan/manifest.json` and `.prtisan/Dockerfile` on the target branch.
 
-Synthetic base branch: A generated branch named from the dependent PR number that merges multiple open blocker branches so a dependent PR can have one GitHub PR base while still depending on several prior PRs.
+Sandcastle: The pinned Docker environment in which all Codex analysis, editing,
+and candidate verification executes. The operator's normal Codex home is never
+mounted.
 
-Validation pass: A review run that checks a PR against repository standards and the related issue context.
+Agent role: One of the seven exhaustive production responsibilities:
+`standardsReview`, `specReview`, `repairVerification`, `validationRepair`,
+`ciRepair`, `mergeStateRepair`, or `restackConflictRepair`. Every Sandcastle
+invocation has exactly one role.
 
-Stale validation pass: A validation pass whose review marker was written for an earlier PR branch head instead of the current PR branch head.
+Model profile: A frozen `{ model, reasoningEffort }` pair assigned to one agent
+role. The pair is passed explicitly to Codex and is never inferred from a
+filename, risk heuristic, canary, or runtime policy.
 
-Repair pass: A Codex run on an existing PR branch that attempts to fix blocking validation findings before the tool posts remaining comments.
+Routing policy: The repository-owned schema-v2 `codex.roles` map that assigns
+one model profile to every agent role. The exact map participates in validation
+and review-cache identity.
 
-CI repair pass: A Codex run on an existing PR branch that attempts to fix failing status checks using GitHub check evidence.
+Evaluation case: A frozen, reproducible role-specific workload with pinned
+repository state, prompt/tool/runtime inputs, verification, split, and expected
+result. Each role has one screening and two hidden holdout cases per repository.
+
+Gold set: The single-maintainer-authored expected findings, classifications, or
+mutation invariants frozen before candidate output is revealed. Gold data for
+private repositories stays under XDG data with `0600` permissions.
+
+Managed summary: The single `prtisan:summary` GitHub comment updated in place
+with the plan, snapshot, blocker, evidence, and next action.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { defaultManifest } from "@/manifest.js";
+import { defaultManifest, ManifestError } from "@/manifest.js";
 import { buildOpenPrGraph, type OpenPrGraph } from "@/open-pr-graph.js";
 import { InMemoryArtifactStore } from "@/workflow/artifacts.js";
 import { InMemoryWorkflowJournal } from "@/workflow/journal.js";
@@ -13,12 +13,249 @@ import type {
 } from "@/workflow/types.js";
 import {
   PrtisanWorkflow,
+  SetupRequiredError,
   type WorkflowEnvironment,
+  type WorkflowRunResult,
 } from "@/workflow/workflow.js";
 
 import { pullRequest } from "./helpers.js";
 
 describe("Prtisan workflow", () => {
+  test("runs a newly planned train through one workflow operation", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    const workflow = createWorkflow(environment);
+
+    const result = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(result).toMatchObject({
+      kind: "train",
+      repo: "o/r",
+      cwd: "/repo",
+      snapshot: {
+        outcome: "completed",
+        merged: [1],
+      },
+    });
+    expect(result.planId).toStartWith("plan-");
+    expect(environment.mergeCalls).toEqual([1]);
+  });
+
+  test("resumes the latest checkpointed plan for the repository", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.prepareResult.set(1, {
+      kind: "waiting_external",
+      blocker: {
+        category: "github_checks",
+        message: "PR #1 is waiting for required checks.",
+        external: true,
+      },
+    });
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_000_000_000 + tick++),
+    });
+
+    const waiting = requireTrain(await workflow.run({ cwd: "/repo" }));
+    environment.prepareResult.delete(1);
+    const completed = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(waiting.snapshot.outcome).toBe("waiting_external");
+    expect(completed.planId).toBe(waiting.planId);
+    expect(completed.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1],
+    });
+    expect(environment.mergeCalls).toEqual([1]);
+  });
+
+  test("creates fresh authority after the previous train completed", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_100_000_000 + tick++),
+    });
+
+    const first = requireTrain(await workflow.run({ cwd: "/repo" }));
+    const second = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(first.snapshot.outcome).toBe("completed");
+    expect(second.snapshot.outcome).toBe("completed");
+    expect(second.planId).not.toBe(first.planId);
+    expect(environment.mergeCalls).toEqual([1]);
+  });
+
+  test("replans and applies when the latest checkpoint became stale", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.prepareResult.set(1, {
+      kind: "waiting_external",
+      blocker: {
+        category: "github_checks",
+        message: "PR #1 is waiting for required checks.",
+        external: true,
+      },
+    });
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_200_000_000 + tick++),
+    });
+    const waiting = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    const added = contractPr({ number: 9, headRefName: "added" });
+    environment.add(added);
+    environment.replaceGraph(
+      buildOpenPrGraph(
+        [
+          { pr: contractPr({ number: 1, headRefName: "branch-1" }) },
+          { pr: added },
+        ],
+        "main"
+      )
+    );
+    environment.prepareResult.delete(1);
+
+    const completed = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(waiting.snapshot.outcome).toBe("waiting_external");
+    expect(completed.planId).not.toBe(waiting.planId);
+    expect(completed.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1, 9],
+    });
+    expect(environment.mergeCalls).toEqual([1, 9]);
+  });
+
+  test("returns an onboarding checkpoint when the manifest is missing", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.inspectFailure = new SetupRequiredError(
+      ".prtisan/manifest.json is required on origin/main."
+    );
+    environment.setupCheckpoint = {
+      cwd: "/repo",
+      repo: "o/r",
+      targetBranch: "main",
+      setupPr: {
+        number: 213,
+        url: "https://github.com/o/r/pull/213",
+      },
+    };
+    const workflow = createWorkflow(environment);
+
+    const result = await workflow.run({ cwd: "/repo" });
+
+    expect(result).toEqual({
+      kind: "setup",
+      cwd: "/repo",
+      repo: "o/r",
+      outcome: "waiting_external",
+      targetBranch: "main",
+      setupPr: {
+        number: 213,
+        url: "https://github.com/o/r/pull/213",
+      },
+      blocker: {
+        category: "policy",
+        external: true,
+        message: "Merge setup PR #213 so .prtisan/manifest.json reaches main.",
+      },
+    });
+    expect(environment.setupCalls).toBe(1);
+    expect(environment.mergeCalls).toEqual([]);
+  });
+
+  test("does not replace an invalid repository policy with automatic setup", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.inspectFailure = new ManifestError(
+      "origin/main:.prtisan/manifest.json is invalid."
+    );
+    const workflow = createWorkflow(environment);
+
+    await expect(workflow.run({ cwd: "/repo" })).rejects.toThrow(
+      "manifest.json is invalid"
+    );
+    expect(environment.setupCalls).toBe(0);
+  });
+
+  test("resumes a partially merged prefix without repeating effects", async () => {
+    const environment = new FakeEnvironment(linearGraph());
+    environment.prepareResult.set(2, {
+      kind: "waiting_external",
+      blocker: {
+        category: "human_review",
+        message: "PR #2 requires human approval.",
+        external: true,
+      },
+    });
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_300_000_000 + tick++),
+    });
+
+    const partial = requireTrain(await workflow.run({ cwd: "/repo" }));
+    environment.prepareResult.delete(2);
+    const completed = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(partial.snapshot).toMatchObject({
+      outcome: "partially_completed",
+      merged: [1],
+    });
+    expect(completed.planId).toBe(partial.planId);
+    expect(completed.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1, 2],
+    });
+    expect(environment.mergeCalls).toEqual([1, 2]);
+    expect(environment.restackMutations).toEqual([2]);
+  });
+
+  test("does not reset an unchanged exhausted repair attempt", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.prepareResult.set(1, {
+      kind: "repair_exhausted",
+      repairCandidates: 3,
+      causeAttempts: { "cause-1": 2 },
+      blocker: {
+        category: "repair_budget",
+        message: "PR #1 exhausted its repair budget.",
+        external: false,
+      },
+    });
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_400_000_000 + tick++),
+    });
+
+    const first = requireTrain(await workflow.run({ cwd: "/repo" }));
+    const second = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(second.planId).toBe(first.planId);
+    expect(second.snapshot.outcome).toBe("repair_exhausted");
+    expect(second.snapshot.attempts[0]).toMatchObject({
+      repairCandidates: 3,
+      causeAttempts: { "cause-1": 2 },
+    });
+    expect(environment.mergeCalls).toEqual([]);
+  });
+
+  test("resumes an interrupted external effect without duplicating it", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.failAfterFirstMerge = true;
+    let tick = 0;
+    const workflow = createWorkflow(environment, {
+      now: () => new Date(1_786_500_000_000 + tick++),
+    });
+
+    const interrupted = requireTrain(await workflow.run({ cwd: "/repo" }));
+    const resumed = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(interrupted.snapshot.outcome).toBe("infrastructure_failed");
+    expect(resumed.planId).toBe(interrupted.planId);
+    expect(resumed.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1],
+    });
+    expect(environment.mergeCalls).toEqual([1]);
+  });
+
   test("plans and idempotently integrates a draft linear stack", async () => {
     const environment = new FakeEnvironment(linearGraph());
     const workflow = createWorkflow(environment);
@@ -178,6 +415,17 @@ class FakeEnvironment implements WorkflowEnvironment {
   failAfterFirstMerge = false;
   failAfterFirstPromotion = false;
   failAfterFirstRestack = false;
+  inspectFailure?: Error;
+  setupCheckpoint?: {
+    readonly cwd: string;
+    readonly repo: string;
+    readonly targetBranch: string;
+    readonly setupPr: {
+      readonly number: number;
+      readonly url: string;
+    };
+  };
+  setupCalls = 0;
   private didFailAfterMerge = false;
   private didFailAfterPromotion = false;
   private didFailAfterRestack = false;
@@ -186,7 +434,7 @@ class FakeEnvironment implements WorkflowEnvironment {
     ReturnType<typeof pullRequest>
   >();
 
-  constructor(private readonly graph: OpenPrGraph) {
+  constructor(private graph: OpenPrGraph) {
     for (const node of graph.nodes.values()) {
       this.pullRequests.set(node.pr.number, { ...node.pr });
     }
@@ -196,7 +444,12 @@ class FakeEnvironment implements WorkflowEnvironment {
     this.pullRequests.set(pr.number, pr);
   }
 
+  replaceGraph(graph: OpenPrGraph): void {
+    this.graph = graph;
+  }
+
   async inspect() {
+    if (this.inspectFailure) throw this.inspectFailure;
     const manifest = defaultManifest({
       commands: [{ name: "Check", command: "bun test", timeoutMs: 60_000 }],
     });
@@ -214,6 +467,14 @@ class FakeEnvironment implements WorkflowEnvironment {
       requiredChecks: ["check"],
       policyDigest: async () => "policy-digest",
     };
+  }
+
+  async setup() {
+    this.setupCalls += 1;
+    if (!this.setupCheckpoint) {
+      throw new Error("Fake setup checkpoint was not configured.");
+    }
+    return this.setupCheckpoint;
   }
 
   async listOpenPullRequests(): Promise<
@@ -257,8 +518,8 @@ class FakeEnvironment implements WorkflowEnvironment {
     return {
       kind: selected?.kind ?? "ready",
       pullRequest: pr,
-      repairCandidates: attempt.repairCandidates,
-      causeAttempts: {},
+      repairCandidates: selected?.repairCandidates ?? attempt.repairCandidates,
+      causeAttempts: selected?.causeAttempts ?? {},
       blocker: selected?.blocker,
     };
   }
@@ -334,13 +595,25 @@ class FakeEnvironment implements WorkflowEnvironment {
   }
 }
 
-function createWorkflow(environment: WorkflowEnvironment): PrtisanWorkflow {
+function createWorkflow(
+  environment: WorkflowEnvironment,
+  clock = { now: () => new Date("2026-07-27T00:00:00.000Z") }
+): PrtisanWorkflow {
   return new PrtisanWorkflow(
     new InMemoryWorkflowJournal(),
     new InMemoryArtifactStore(),
     environment,
-    { now: () => new Date("2026-07-27T00:00:00.000Z") }
+    clock
   );
+}
+
+function requireTrain(
+  result: WorkflowRunResult
+): Extract<WorkflowRunResult, { readonly kind: "train" }> {
+  if (result.kind !== "train") {
+    throw new Error("Expected a train result.");
+  }
+  return result;
 }
 
 function contractPr(

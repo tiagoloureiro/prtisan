@@ -19,7 +19,6 @@ export interface ValidationSnapshot {
   readonly runtimeFingerprint: string;
   readonly policyDigest: string;
   readonly changedFiles: readonly string[];
-  readonly highRisk: boolean;
 }
 
 export function buildValidationSnapshot(input: {
@@ -38,8 +37,7 @@ export function buildValidationSnapshot(input: {
   );
   const policyDigest = stableDigest({
     version: VALIDATION_POLICY_VERSION,
-    models: input.config.models,
-    reasoning: input.config.reasoning,
+    agentProfiles: input.config.agentProfiles,
     validation: input.config.validation,
   });
   const snapshot = {
@@ -51,7 +49,6 @@ export function buildValidationSnapshot(input: {
     runtimeFingerprint: input.runtimeFingerprint,
     policyDigest,
     changedFiles,
-    highRisk: changedFiles.some(isHighRiskPath),
   };
 
   return {
@@ -129,12 +126,6 @@ export function changedFilesFromDiff(diff: string): string[] {
     if (match?.[2]) files.add(match[2]);
   }
   return [...files].sort();
-}
-
-export function isHighRiskPath(path: string): boolean {
-  return /(^|\/)(auth|security|privacy|money|finance|billing|payments?|migrations?|database|db|ci|workflows?|infra)(\/|\.|$)|(^|\/)\.github\/|openapi|public-api/i.test(
-    path
-  );
 }
 
 function stableJsonStringify(value: unknown): string {

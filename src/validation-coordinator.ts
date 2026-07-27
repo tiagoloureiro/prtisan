@@ -423,12 +423,13 @@ export class ValidationCoordinator {
     metrics: Metrics,
     axis: ReviewAxis
   ): Promise<ReviewReport> {
-    const effort = snapshot.highRisk ? "medium" : "low";
+    const role = axis === "standards" ? "standardsReview" : "specReview";
+    const profile = request.config.agentProfiles[role];
     const key = reviewCacheKey({
       snapshotKey: snapshot.key,
       axis,
-      model: request.config.models.review,
-      effort,
+      role,
+      profile,
       promptSchemaDigest: REVIEW_PROMPT_SCHEMA_DIGEST,
     });
     return singleFlight(`review:${key}`, async () => {
@@ -454,12 +455,14 @@ export class ValidationCoordinator {
         changedFiles: snapshot.changedFiles,
         diff: "",
         axis,
-        effort,
         runtime,
       });
       metrics.afterAgent(report);
       const normalized = {
-        ...report,
+        axis: report.axis,
+        summary: report.summary,
+        promptChars: report.promptChars,
+        durationMs: report.durationMs,
         findings: normalizeAndDedupeFindings(report.findings),
       };
       await this.cache.set(key, normalized);

@@ -59,9 +59,14 @@
         >
       </p>
       <h2>Workflow</h2>
-      <pre><code>prtisan init plan --cwd /repo
-prtisan init apply &lt;setup-plan-id&gt;
-prtisan plan --cwd /repo
+      <pre><code>prtisan run --cwd /repo</code></pre>
+      <p>
+        The normal command creates or reuses the setup PR, creates or resumes a
+        frozen plan, and applies the train. Every checkpoint prints the same
+        command needed to resume.
+      </p>
+      <h2>Advanced recovery</h2>
+      <pre><code>prtisan plan --cwd /repo
 prtisan apply &lt;plan-id&gt;
 prtisan status &lt;plan-id&gt;
 prtisan export &lt;plan-id&gt;</code></pre>
@@ -76,11 +81,32 @@ prtisan export &lt;plan-id&gt;</code></pre>
         structured PR-body sections declared in
         <code>.prtisan/manifest.json</code>.
       </p>
+      <h2>Fixed agent-role profiles</h2>
+      <p>
+        Manifest schema v2 assigns an explicit model and reasoning effort to
+        each of seven review, verification, repair, CI, merge-state, and
+        restacking roles. The profile is part of validation identity and is
+        passed unchanged to every Sandcastle invocation. Production has no
+        dynamic routing or canaries.
+      </p>
+      <p>
+        <a href="./model-routing-methodology.md"
+          >Model-routing benchmark methodology</a
+        >
+        ·
+        <a href="./adr/0008-fixed-agent-role-model-profiles.md">ADR 0008</a>
+      </p>
       <h2>State</h2>
       <p>
         Journal and leases use the XDG state directory. Artifacts, caches, and a
         dedicated Prtisan Codex home use the XDG data directory. Credentials and
         execution records never live in the target repository.
+      </p>
+      <p>
+        A separate permission-restricted SQLite store records only role/profile,
+        token and credit totals, duration, retries, cache use, and terminal
+        outcome. It cannot contain prompts, source, findings, output, or
+        patches.
       </p>
     </main>
   </body>

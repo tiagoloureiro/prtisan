@@ -15,13 +15,9 @@ export function testConfig(
   return {
     ...defaults,
     ...input,
-    models: {
-      ...defaults.models,
-      ...input.models,
-    },
-    reasoning: {
-      ...defaults.reasoning,
-      ...input.reasoning,
+    agentProfiles: {
+      ...defaults.agentProfiles,
+      ...input.agentProfiles,
     },
     concurrency: {
       ...defaults.concurrency,

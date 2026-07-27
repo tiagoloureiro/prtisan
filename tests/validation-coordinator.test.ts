@@ -736,16 +736,14 @@ function agentRunner(
 ): AgentRunner {
   return {
     review: async (input) => {
-      const axis = input.kind === "pull-request" ? input.axis : "spec";
+      const axis = input.axis;
       calls.push(`review:${axis}`);
       return { axis, summary: "", findings };
     },
     repair: async (input) => {
       calls.push("repair");
       const repairFindings =
-        input.kind === "pull-request" || input.kind === "issue-branch"
-          ? input.findings
-          : [];
+        input.kind === "pull-request" ? input.findings : [];
       return {
         branch: input.branch,
         commits,

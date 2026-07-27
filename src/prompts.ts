@@ -55,20 +55,6 @@ export interface RestackConflictRepairPromptInput {
   readonly uniqueDiff: string;
 }
 
-export interface IssueBranchReviewPromptInput {
-  readonly issue: Issue;
-  readonly relatedIssues: readonly Issue[];
-  readonly targetBranch: string;
-}
-
-export interface IssueBranchRepairPromptInput {
-  readonly issue: Issue;
-  readonly relatedIssues: readonly Issue[];
-  readonly findings: readonly ReviewFinding[];
-  readonly branch: string;
-  readonly targetBranch: string;
-}
-
 export interface RepairVerificationPromptInput {
   readonly issue?: Issue;
   readonly relatedIssues: readonly Issue[];
@@ -136,46 +122,6 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     relatedIssuesSummary(input.relatedIssues),
     "",
     `Changed files: ${(input.changedFiles ?? []).join(", ") || "(inspect the diff)"}.`,
-  ].join("\n");
-}
-
-export function buildIssueBranchReviewPrompt(
-  input: IssueBranchReviewPromptInput
-): string {
-  return [
-    `You are validating target branch ${input.targetBranch} for GitHub issue #${input.issue.number}.`,
-    "There is no PR diff for this validation. Inspect the repository state on the current branch and decide whether it satisfies the issue.",
-    "Use $code-review as the review rubric, but run only the Spec axis.",
-    "",
-    "Review only the Spec axis.",
-    "Find missing requirements, partial implementation, wrong behavior, and scope creep.",
-    "Quote or reference the issue text that justifies each finding.",
-    "",
-    "Return only JSON between <review> and </review> tags with this shape:",
-    JSON.stringify(
-      {
-        axis: "spec",
-        summary: "one short summary",
-        findings: [
-          {
-            axis: "spec",
-            severity: "blocking or advisory",
-            title: "short title",
-            body: "actionable explanation",
-            rule: "issue requirement",
-            evidence: "specific observed code or behavior",
-            path: "optional repository path",
-            line: 123,
-          },
-        ],
-      },
-      null,
-      2
-    ),
-    "After the </review> tag, output <promise>COMPLETE</promise>.",
-    "",
-    issueBlock("Primary issue", input.issue),
-    relatedIssuesSummary(input.relatedIssues),
   ].join("\n");
 }
 
@@ -274,31 +220,6 @@ export function buildRestackConflictRepairPrompt(
     "",
     "Former child-unique diff:",
     input.uniqueDiff,
-  ].join("\n");
-}
-
-export function buildIssueBranchRepairPrompt(
-  input: IssueBranchRepairPromptInput
-): string {
-  return [
-    `You are repairing branch ${input.branch} for GitHub issue #${input.issue.number}.`,
-    `Base branch: ${input.targetBranch}.`,
-    "",
-    "Fix only clear blocking validation findings listed below.",
-    "Do not address advisory findings unless they are trivial and directly adjacent to a blocking fix.",
-    "Commit the repair to the current branch. Prtisan will independently run the authoritative verification commands.",
-    repairOutputInstruction(),
-    "When finished, output <promise>COMPLETE</promise>.",
-    "",
-    issueBlock("Primary issue", input.issue),
-    relatedIssuesSummary(input.relatedIssues),
-    "",
-    "Blocking findings:",
-    JSON.stringify(
-      input.findings.filter((finding) => finding.severity === "blocking"),
-      null,
-      2
-    ),
   ].join("\n");
 }
 

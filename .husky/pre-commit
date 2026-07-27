@@ -3,6 +3,7 @@ PATH="$repo_root/node_modules/.bin:$PATH"
 export PATH
 
 bunx lint-staged
+unset GIT_INDEX_FILE
 bun run lint
 bun run format:check
 bun run typecheck

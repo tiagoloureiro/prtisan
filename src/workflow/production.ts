@@ -1,4 +1,6 @@
 import { SandcastleCodexRunner } from "@/agent.js";
+import { SqliteAgentTelemetrySink } from "@/agent-telemetry.js";
+import { executeInit } from "@/commands/init.js";
 import { executeValidate } from "@/commands/validate.js";
 import { DockerBaseImageManager } from "@/docker-image.js";
 import type { CommandRunner } from "@/exec.js";
@@ -9,7 +11,12 @@ import {
   pullRequestCheckStatus,
   pullRequestReadinessBlockers,
 } from "@/github.js";
-import { loadManifestAtRef, type PrtisanManifest } from "@/manifest.js";
+import {
+  loadManifestAtRef,
+  ManifestMissingError,
+  ManifestUpgradeRequiredError,
+  type PrtisanManifest,
+} from "@/manifest.js";
 import { preparePullRequestForMerge } from "@/merge-readiness.js";
 import { loadOpenPrGraph } from "@/open-pr-graph.js";
 import { joinPath } from "@/path.js";
@@ -20,6 +27,11 @@ import {
   DeclaredRuntimeProvider,
   DockerVerificationRunner,
 } from "@/runtime.js";
+import {
+  assertSetupPlanFresh,
+  createSetupPlan,
+  SetupPlanStore,
+} from "@/setup-plan.js";
 import type { AgentTrainConfig, PullRequest } from "@/types.js";
 import { changedFilesFromDiff, stableDigest } from "@/validation-hardening.js";
 import { ValidationLeaseManager } from "@/validation-lease.js";
@@ -35,6 +47,7 @@ import type {
 } from "./types.js";
 import {
   freezeContract as freezeCurrentContract,
+  SetupRequiredError,
   type WorkflowEnvironment,
   WorkflowStopError,
 } from "./workflow.js";
@@ -47,15 +60,70 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
     private readonly log: (message: string) => void = console.error
   ) {}
 
+  async setup(input: { readonly cwd: string }) {
+    const plan = await createSetupPlan({
+      cwd: input.cwd,
+      runner: this.runner,
+    });
+    const store = await SetupPlanStore.open(prtisanPaths().journal);
+    try {
+      store.save(plan);
+    } finally {
+      store.close();
+    }
+    await assertSetupPlanFresh(plan, this.runner);
+    const result = await executeInit(
+      {
+        cwd: plan.cwd,
+        repo: plan.repo,
+        targetBranch: plan.targetBranch,
+        branch: plan.branch,
+        manifest: plan.proposedManifest,
+        force: plan.upgrade,
+      },
+      {
+        runner: this.runner,
+        github: new GitHubClient(this.runner, plan.cwd),
+        log: this.log,
+      }
+    );
+    if (!result.pr) {
+      throw new Error(
+        result.reason ??
+          "Prtisan setup did not create or locate a setup pull request."
+      );
+    }
+    return {
+      cwd: plan.cwd,
+      repo: plan.repo,
+      targetBranch: plan.targetBranch,
+      setupPr: {
+        number: result.pr.number,
+        url: result.pr.url,
+      },
+    };
+  }
+
   async inspect(input: { readonly cwd: string }) {
     const cwd = await this.gitRoot(input.cwd);
     const discovered = await this.discoverRepository(cwd);
     await this.fetch(cwd, discovered.defaultBranch);
-    let loaded = await loadManifestAtRef({
-      runner: this.runner,
-      cwd,
-      ref: `origin/${discovered.defaultBranch}`,
-    });
+    let loaded;
+    try {
+      loaded = await loadManifestAtRef({
+        runner: this.runner,
+        cwd,
+        ref: `origin/${discovered.defaultBranch}`,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManifestMissingError ||
+        error instanceof ManifestUpgradeRequiredError
+      ) {
+        throw new SetupRequiredError(error.message);
+      }
+      throw error;
+    }
     if (loaded.manifest.targetBranch !== discovered.defaultBranch) {
       await this.fetch(cwd, loaded.manifest.targetBranch);
       loaded = await loadManifestAtRef({
@@ -555,7 +623,10 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
       config,
       github,
       git,
-      agent: new SandcastleCodexRunner(this.runner),
+      agent: new SandcastleCodexRunner(
+        this.runner,
+        new SqliteAgentTelemetrySink()
+      ),
       runtime,
       verification: new DockerVerificationRunner(this.runner),
       cache: new FileReviewCache(
@@ -642,14 +713,7 @@ export function configFromManifest(
     repo,
     targetBranch,
     remote: "origin",
-    models: {
-      review: manifest.codex.reviewModel,
-      repair: manifest.codex.repairModel,
-    },
-    reasoning: {
-      review: manifest.codex.reviewEffort,
-      repair: manifest.codex.repairEffort,
-    },
+    agentProfiles: manifest.codex.roles,
     concurrency: {
       validate: manifest.limits.readConcurrency,
       github: manifest.limits.githubConcurrency,

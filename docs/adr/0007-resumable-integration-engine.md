@@ -11,11 +11,16 @@ to merge Titally PR 117 demonstrated that local progress was not convergence.
 
 ## Decision
 
-Expose one deep workflow interface: plan, apply/resume, status, and export.
+Expose one deep workflow interface: run, plan, apply/resume, status, and export.
 Freeze the whole open train and its authority in an immutable plan. Record
 external-effect intent and result in an append-only XDG journal. Keep GitHub,
 Git publication, Sandcastle, clock, artifact, and journal behavior behind
 adapters.
+
+`run` is the primary interface. It automates the setup checkpoint, selects the
+latest repository plan, resumes durable work, and creates fresh authority only
+after completion or staleness. The explicit plan-ID operations remain available
+for inspection and recovery.
 
 Codex may diagnose and repair only inside a pinned Docker Sandcastle and only
 against a frozen intent contract. Ordinary repairs are additive. Required
@@ -27,5 +32,6 @@ exact force-with-lease guards.
 
 Old CLI commands, `.sandcastle` configuration, run records, synthetic bases,
 issue sweeps, branch deletion, repeated comments, and the mutating TUI are not
-supported. Interrupted work resumes by plan ID. Infrastructure and ambiguity
-become explicit checkpoints instead of speculative branch mutations.
+supported. Interrupted work normally resumes by rerunning the same `run`
+command; plan IDs remain the low-level recovery handle. Infrastructure and
+ambiguity become explicit checkpoints instead of speculative branch mutations.

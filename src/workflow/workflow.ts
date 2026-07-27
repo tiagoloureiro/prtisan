@@ -21,6 +21,7 @@ export interface WorkflowClock {
 }
 
 export interface WorkflowEnvironment {
+  setup?(input: PlanInput): Promise<WorkflowSetupCheckpoint>;
   inspect(input: { readonly cwd: string }): Promise<{
     readonly cwd: string;
     readonly repo: string;
@@ -65,6 +66,16 @@ export interface PlanInput {
   readonly cwd: string;
 }
 
+export interface WorkflowSetupCheckpoint {
+  readonly cwd: string;
+  readonly repo: string;
+  readonly targetBranch: string;
+  readonly setupPr: {
+    readonly number: number;
+    readonly url: string;
+  };
+}
+
 export interface WorkflowExport {
   readonly plan: TrainPlan;
   readonly snapshot: WorkflowSnapshot;
@@ -73,6 +84,34 @@ export interface WorkflowExport {
     readonly digest: string;
     readonly path: string;
   };
+}
+
+export type WorkflowRunResult =
+  | {
+      readonly kind: "train";
+      readonly cwd: string;
+      readonly repo: string;
+      readonly planId: string;
+      readonly snapshot: WorkflowSnapshot;
+    }
+  | {
+      readonly kind: "setup";
+      readonly cwd: string;
+      readonly repo: string;
+      readonly targetBranch: string;
+      readonly outcome: "waiting_external";
+      readonly setupPr: {
+        readonly number: number;
+        readonly url: string;
+      };
+      readonly blocker: WorkflowBlocker;
+    };
+
+export class SetupRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SetupRequiredError";
+  }
 }
 
 export class WorkflowStopError extends Error {
@@ -99,7 +138,57 @@ export class PrtisanWorkflow {
     private readonly clock: WorkflowClock = { now: () => new Date() }
   ) {}
 
+  async run(input: PlanInput): Promise<WorkflowRunResult> {
+    let candidate: TrainPlan;
+    try {
+      candidate = await this.buildPlan(input);
+    } catch (error) {
+      if (!(error instanceof SetupRequiredError) || !this.environment.setup) {
+        throw error;
+      }
+      const checkpoint = await this.environment.setup(input);
+      return {
+        kind: "setup",
+        ...checkpoint,
+        outcome: "waiting_external",
+        blocker: {
+          category: "policy",
+          message: `Merge setup PR #${checkpoint.setupPr.number} so .prtisan/manifest.json reaches ${checkpoint.targetBranch}.`,
+          external: true,
+        },
+      };
+    }
+    const existing = await this.journal.latestPlan(candidate.repositoryKey);
+    const existingSnapshot = existing
+      ? await this.journal.snapshot(existing.id)
+      : undefined;
+    let plan =
+      existing && existingSnapshot?.outcome !== "completed"
+        ? existing
+        : candidate;
+    if (plan === candidate) await this.persistPlan(plan);
+    let snapshot = await this.apply(plan.id);
+    if (plan === existing && snapshot.outcome === "stale") {
+      plan = candidate;
+      await this.persistPlan(plan);
+      snapshot = await this.apply(plan.id);
+    }
+    return {
+      kind: "train",
+      cwd: plan.cwd,
+      repo: plan.repo,
+      planId: plan.id,
+      snapshot,
+    };
+  }
+
   async plan(input: PlanInput): Promise<TrainPlan> {
+    const plan = await this.buildPlan(input);
+    await this.persistPlan(plan);
+    return plan;
+  }
+
+  private async buildPlan(input: PlanInput): Promise<TrainPlan> {
     const inspected = await this.environment.inspect(input);
     const invalid = graphProblem(inspected.graph);
     if (invalid) throw new Error(invalid);
@@ -189,14 +278,17 @@ export class PrtisanWorkflow {
       id: `plan-${planDigest.slice(0, 16)}`,
       planDigest,
     };
+    return plan;
+  }
+
+  private async persistPlan(plan: TrainPlan): Promise<void> {
     await this.journal.savePlan(plan, {
       type: "plan_created",
-      at: createdAt,
+      at: plan.createdAt,
       planId: plan.id,
       repositoryKey: plan.repositoryKey,
       pullRequests: plan.pullRequests,
     });
-    return plan;
   }
 
   async apply(planId: string): Promise<WorkflowSnapshot> {

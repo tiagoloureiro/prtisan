@@ -104,32 +104,28 @@ describe("validation hardening", () => {
         runtimeFingerprint: "runtime-b",
         config,
       }),
+      buildValidationSnapshot({
+        pr,
+        diff: "diff --git a/src/a.ts b/src/a.ts",
+        issue: primary,
+        relatedIssues: [],
+        standardsContents: ["AGENTS.md\nRun all checks."],
+        runtimeFingerprint: "runtime-a",
+        config: testConfig({
+          agentProfiles: {
+            ...config.agentProfiles,
+            standardsReview: {
+              model: "gpt-5.6-terra",
+              reasoningEffort: "medium",
+            },
+          },
+        }),
+      }),
     ];
 
-    expect(new Set(variants.map((snapshot) => snapshot.key))).toHaveLength(5);
+    expect(new Set(variants.map((snapshot) => snapshot.key))).toHaveLength(6);
     for (const variant of variants) {
       expect(variant.key).not.toBe(baseline.key);
     }
-  });
-
-  test("selects medium reasoning only for deterministic high-risk paths", () => {
-    const config = testConfig();
-    const safe = buildValidationSnapshot({
-      pr: pullRequest({}),
-      diff: "diff --git a/src/button.ts b/src/button.ts",
-      relatedIssues: [],
-      runtimeFingerprint: "runtime",
-      config,
-    });
-    const risky = buildValidationSnapshot({
-      pr: pullRequest({}),
-      diff: "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml",
-      relatedIssues: [],
-      runtimeFingerprint: "runtime",
-      config,
-    });
-
-    expect(safe.highRisk).toBe(false);
-    expect(risky.highRisk).toBe(true);
   });
 });
