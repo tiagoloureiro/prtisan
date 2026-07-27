@@ -44,13 +44,5 @@ Routing policy: The repository-owned schema-v2 `codex.roles` map that assigns
 one model profile to every agent role. The exact map participates in validation
 and review-cache identity.
 
-Evaluation case: A frozen, reproducible role-specific workload with pinned
-repository state, prompt/tool/runtime inputs, verification, split, and expected
-result. Each role has one screening and two hidden holdout cases per repository.
-
-Gold set: The single-maintainer-authored expected findings, classifications, or
-mutation invariants frozen before candidate output is revealed. Gold data for
-private repositories stays under XDG data with `0600` permissions.
-
 Managed summary: The single `prtisan:summary` GitHub comment updated in place
 with the plan, snapshot, blocker, evidence, and next action.

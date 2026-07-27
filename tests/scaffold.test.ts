@@ -5,6 +5,8 @@ import { readJson, readText, writeText } from "@/fs.js";
 import type { PrtisanManifest } from "@/manifest.js";
 import { writeScaffoldFiles } from "@/scaffold.js";
 
+import { QUALITY_FIRST_AGENT_PROFILES } from "./helpers.js";
+
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -48,12 +50,7 @@ describe("Prtisan setup scaffold", () => {
         bootstrap: { command: "pnpm install --frozen-lockfile" },
       },
       codex: {
-        roles: {
-          standardsReview: {
-            model: "gpt-5.6-sol",
-            reasoningEffort: "medium",
-          },
-        },
+        roles: QUALITY_FIRST_AGENT_PROFILES,
       },
     });
     expect(

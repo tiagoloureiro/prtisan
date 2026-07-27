@@ -41,30 +41,6 @@ export interface ModelProfile {
 
 export type AgentRoleProfiles = Readonly<Record<AgentRole, ModelProfile>>;
 
-export interface TokenUsage {
-  readonly inputTokens: number;
-  readonly cacheCreationInputTokens: number;
-  readonly cacheReadInputTokens: number;
-  readonly outputTokens: number;
-}
-
-export interface CreditCost {
-  readonly rateCardId: string;
-  readonly credits: number;
-}
-
-export interface AgentInvocationMetrics {
-  readonly role: AgentRole;
-  readonly profile: ModelProfile;
-  readonly promptChars: number;
-  readonly agentDurationMs: number;
-  readonly iterations: number;
-  readonly retryCount: number;
-  readonly cacheUsed?: boolean;
-  readonly usage?: TokenUsage;
-  readonly creditCost?: CreditCost;
-}
-
 export interface DockerMountConfig {
   readonly hostPath: string;
   readonly sandboxPath: string;
@@ -191,7 +167,6 @@ export interface ReviewReport {
   readonly findings: readonly ReviewFinding[];
   readonly promptChars?: number;
   readonly durationMs?: number;
-  readonly invocation?: AgentInvocationMetrics;
   readonly rawOutput?: string;
   readonly logFilePath?: string;
 }
@@ -202,7 +177,6 @@ export interface RepairVerificationReport {
   readonly findings: readonly ReviewFinding[];
   readonly promptChars?: number;
   readonly durationMs?: number;
-  readonly invocation?: AgentInvocationMetrics;
   readonly rawOutput?: string;
   readonly logFilePath?: string;
 }
@@ -216,8 +190,12 @@ export interface AgentRunOutcome {
   readonly sessionId?: string;
   readonly promptChars?: number;
   readonly durationMs?: number;
-  readonly usage?: TokenUsage;
-  readonly invocation?: AgentInvocationMetrics;
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly cacheCreationInputTokens: number;
+    readonly cacheReadInputTokens: number;
+    readonly outputTokens: number;
+  };
 }
 
 export interface VerificationResult {

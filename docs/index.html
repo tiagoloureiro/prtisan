@@ -90,10 +90,12 @@ prtisan export &lt;plan-id&gt;</code></pre>
         dynamic routing or canaries.
       </p>
       <p>
-        <a href="./model-routing-methodology.md"
-          >Model-routing benchmark methodology</a
-        >
-        ·
+        Generated policy uses Sol-medium for standards review, specification
+        review, validation repair, and merge-state repair; Terra-medium for
+        repair verification and CI repair; and Sol-high for restack conflict
+        repair.
+      </p>
+      <p>
         <a href="./adr/0008-fixed-agent-role-model-profiles.md">ADR 0008</a>
       </p>
       <h2>State</h2>
@@ -101,12 +103,6 @@ prtisan export &lt;plan-id&gt;</code></pre>
         Journal and leases use the XDG state directory. Artifacts, caches, and a
         dedicated Prtisan Codex home use the XDG data directory. Credentials and
         execution records never live in the target repository.
-      </p>
-      <p>
-        A separate permission-restricted SQLite store records only role/profile,
-        token and credit totals, duration, retries, cache use, and terminal
-        outcome. It cannot contain prompts, source, findings, output, or
-        patches.
       </p>
     </main>
   </body>

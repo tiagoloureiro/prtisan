@@ -94,12 +94,13 @@ Every Codex invocation is assigned exactly one role:
 `{ model, reasoningEffort }` profile under `codex.roles`. The exact role and
 profile participate in validation-policy digests and review-cache keys. Prtisan
 passes both values explicitly to Sandcastle; changed filenames and other runtime
-heuristics cannot alter effort. Production does not benchmark, route
-dynamically, run canaries, or rewrite repository policy.
+heuristics cannot alter effort. Production does not route dynamically, run
+canaries, or rewrite repository policy.
 
-All generated profiles initially use `gpt-5.6-sol` with medium effort. A
-maintainer may promote a cheaper profile only from an approved benchmark report.
-See the [model-routing methodology](model-routing-methodology.md) and
+Generated policy uses Sol-medium for standards review, specification review,
+validation repair, and merge-state repair; Terra-medium for repair verification
+and CI repair; and Sol-high for restack conflict repair. Existing schema-v2
+manifests remain authoritative. See
 [ADR 0008](adr/0008-fixed-agent-role-model-profiles.md).
 
 ## Merge and restack
@@ -117,33 +118,11 @@ state, blockers, and evidence.
 ## Durable state and credentials
 
 - Journal and leases: `$XDG_STATE_HOME/prtisan`
-- Privacy-minimal agent telemetry:
-  `$XDG_STATE_HOME/prtisan/repositories/<repository-key>/telemetry`
 - Artifacts and caches: `$XDG_DATA_HOME/prtisan`
 - Dedicated Codex home: `$XDG_DATA_HOME/prtisan/codex-home`
 
 Exports are redacted and content-addressed. Target repositories contain only the
 tracked manifest and Dockerfile, never credentials or execution records.
-Telemetry stores only role/profile, tokens, calculated credits, duration,
-retries, cache use, and terminal outcome. Prompts, repository paths, source,
-findings, outputs, and patches are structurally absent.
-
-## Maintainer model evaluation
-
-The benchmark is available only from the source tree:
-
-```text
-bun run eval:models validate-corpus
-bun run eval:models run --cap 5000
-bun run eval:models report --output evals/model-routing/latest-report.json
-```
-
-The command validates the frozen 105-case shape, resumes idempotently from its
-SQLite journal, runs profiles serially under a P99 credit reserve, and writes
-raw private artifacts under XDG data with `0600` permissions. Redacted reports
-contain sample counts, quality intervals, hard failures, token mix, credits,
-agent/end-to-end latency, rejected profiles, and one recommendation per role.
-Rate-only changes require only `report`, which reprices stored tokens.
 
 ## GitHub Issue And PR Conventions
 

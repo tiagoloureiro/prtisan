@@ -5,6 +5,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { loadConfig } from "@/config.js";
 
+import { QUALITY_FIRST_AGENT_PROFILES } from "./helpers.js";
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -34,6 +36,7 @@ describe("validation configuration compatibility", () => {
       maxAgentRunsPerHead: 4,
       promptCharBudget: 32_000,
     });
+    expect(config.agentProfiles).toEqual(QUALITY_FIRST_AGENT_PROFILES);
     expect(config.retention).toMatchObject({
       keepSessions: true,
       sessionPolicy: "failures",

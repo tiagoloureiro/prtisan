@@ -265,10 +265,34 @@ export function manifestForSetup(
 }
 
 export function defaultAgentProfiles(): AgentRoleProfiles {
-  return Object.fromEntries(
-    AGENT_ROLES.map((role) => [
-      role,
-      { model: "gpt-5.6-sol", reasoningEffort: "medium" },
-    ])
-  ) as unknown as AgentRoleProfiles;
+  return {
+    standardsReview: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+    },
+    specReview: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+    },
+    repairVerification: {
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+    validationRepair: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+    },
+    ciRepair: {
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    },
+    mergeStateRepair: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+    },
+    restackConflictRepair: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+    },
+  };
 }

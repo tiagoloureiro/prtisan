@@ -1,5 +1,4 @@
 import { SandcastleCodexRunner } from "@/agent.js";
-import { SqliteAgentTelemetrySink } from "@/agent-telemetry.js";
 import { executeInit } from "@/commands/init.js";
 import { executeValidate } from "@/commands/validate.js";
 import { DockerBaseImageManager } from "@/docker-image.js";
@@ -623,10 +622,7 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
       config,
       github,
       git,
-      agent: new SandcastleCodexRunner(
-        this.runner,
-        new SqliteAgentTelemetrySink()
-      ),
+      agent: new SandcastleCodexRunner(this.runner),
       runtime,
       verification: new DockerVerificationRunner(this.runner),
       cache: new FileReviewCache(

@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, mock, test } from "bun:test";
 
-import {
-  AgentOutputError,
-  parseReviewReport,
-  SandcastleCodexRunner,
-} from "@/agent.js";
+import { parseReviewReport, SandcastleCodexRunner } from "@/agent.js";
 import { BunCommandRunner, mustRun } from "@/exec.js";
 import type { AgentRoleProfiles } from "@/types.js";
 
@@ -28,22 +24,13 @@ interface SandcastleRunInput {
   };
 }
 
-interface SandcastleIteration {
-  readonly usage?: {
-    readonly inputTokens: number;
-    readonly cacheCreationInputTokens: number;
-    readonly cacheReadInputTokens: number;
-    readonly outputTokens: number;
-  };
-}
-
 interface SandcastleRunResult {
   readonly branch: string;
   readonly commits: { readonly sha: string }[];
   readonly stdout: string;
   readonly output: unknown;
   readonly logFilePath: string;
-  readonly iterations: readonly SandcastleIteration[];
+  readonly iterations: readonly object[];
 }
 
 const defaultSandcastleRun = async (): Promise<SandcastleRunResult> => ({
@@ -145,7 +132,7 @@ describe("SandcastleCodexRunner", () => {
     expect(lastRunInput.sandbox?.env).toBeUndefined();
   });
 
-  test("passes the exact role profile and aggregates every retry usage", async () => {
+  test("passes the exact configured role profile", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "agent-train-profile-test-"));
     const defaults = testConfig();
     const config = testConfig({
@@ -163,28 +150,11 @@ describe("SandcastleCodexRunner", () => {
       stdout: "",
       output: { summary: "", findings: [] },
       logFilePath: "/tmp/agent.log",
-      iterations: [
-        {
-          usage: {
-            inputTokens: 100,
-            cacheCreationInputTokens: 20,
-            cacheReadInputTokens: 30,
-            outputTokens: 40,
-          },
-        },
-        {
-          usage: {
-            inputTokens: 10,
-            cacheCreationInputTokens: 2,
-            cacheReadInputTokens: 3,
-            outputTokens: 4,
-          },
-        },
-      ],
+      iterations: [],
     });
 
     try {
-      const report = await new SandcastleCodexRunner().review({
+      await new SandcastleCodexRunner().review({
         kind: "pull-request",
         cwd,
         config,
@@ -201,23 +171,6 @@ describe("SandcastleCodexRunner", () => {
         model: "gpt-5.6-terra",
         options: { effort: "high" },
       });
-      expect(report.invocation).toMatchObject({
-        role: "standardsReview",
-        profile: {
-          model: "gpt-5.6-terra",
-          reasoningEffort: "high",
-        },
-        iterations: 2,
-        retryCount: 1,
-        cacheUsed: true,
-        usage: {
-          inputTokens: 110,
-          cacheCreationInputTokens: 22,
-          cacheReadInputTokens: 33,
-          outputTokens: 44,
-        },
-      });
-      expect(report.invocation?.creditCost?.credits).toBeCloseTo(0.02495625, 8);
     } finally {
       sandcastleRun = defaultSandcastleRun;
     }
@@ -320,62 +273,6 @@ describe("SandcastleCodexRunner", () => {
     );
 
     expect(observed).toEqual(roles.map((role) => `model-${role}`));
-  });
-
-  test("retains retry usage when structured output is malformed", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "agent-train-malformed-test-"));
-    sandcastleRun = async () => {
-      throw Object.assign(new Error("invalid structured output JSON"), {
-        iterations: [
-          {
-            usage: {
-              inputTokens: 100,
-              cacheCreationInputTokens: 0,
-              cacheReadInputTokens: 20,
-              outputTokens: 30,
-            },
-          },
-          {
-            usage: {
-              inputTokens: 10,
-              cacheCreationInputTokens: 0,
-              cacheReadInputTokens: 2,
-              outputTokens: 3,
-            },
-          },
-        ],
-      });
-    };
-
-    try {
-      const error = await new SandcastleCodexRunner()
-        .review({
-          kind: "pull-request",
-          cwd,
-          config: testConfig(),
-          runId: "test",
-          axis: "standards",
-          prNumber: 1,
-          branch: "branch-1",
-          baseBranch: "main",
-          diff: "",
-          relatedIssues: [],
-        })
-        .catch((caught: unknown) => caught);
-
-      expect(error).toBeInstanceOf(AgentOutputError);
-      expect((error as AgentOutputError).invocation).toMatchObject({
-        iterations: 2,
-        retryCount: 1,
-        usage: {
-          inputTokens: 110,
-          cacheReadInputTokens: 22,
-          outputTokens: 33,
-        },
-      });
-    } finally {
-      sandcastleRun = defaultSandcastleRun;
-    }
   });
 
   test("recovers commits created before a structured-output retry", async () => {

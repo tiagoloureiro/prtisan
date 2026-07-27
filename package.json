@@ -19,7 +19,6 @@
     "release:pack": "mkdir -p release && rm -f release/*.tgz release/SHA256SUMS && bun run build && bun pm pack --destination release && sha256sum release/*.tgz > release/SHA256SUMS",
     "init": "bun run src/index.ts init",
     "plan": "bun run src/index.ts plan",
-    "eval:models": "bun run src/model-eval/cli.ts",
     "lint": "eslint .",
     "format": "prettier --ignore-unknown --write .",
     "format:check": "prettier --ignore-unknown --check .",

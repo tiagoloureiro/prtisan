@@ -2,7 +2,43 @@ import { writeFile } from "node:fs/promises";
 
 import { defaultConfig } from "@/config.js";
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
-import type { AgentTrainConfig, Issue, PullRequest } from "@/types.js";
+import type {
+  AgentRoleProfiles,
+  AgentTrainConfig,
+  Issue,
+  PullRequest,
+} from "@/types.js";
+
+export const QUALITY_FIRST_AGENT_PROFILES: AgentRoleProfiles = {
+  standardsReview: {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+  },
+  specReview: {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+  },
+  repairVerification: {
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+  },
+  validationRepair: {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+  },
+  ciRepair: {
+    model: "gpt-5.6-terra",
+    reasoningEffort: "medium",
+  },
+  mergeStateRepair: {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+  },
+  restackConflictRepair: {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+  },
+};
 
 export function testConfig(
   input: Partial<AgentTrainConfig> = {}

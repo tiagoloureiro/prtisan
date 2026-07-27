@@ -9,7 +9,7 @@ import {
   parseManifest,
 } from "@/manifest.js";
 
-import { FakeRunner } from "./helpers.js";
+import { FakeRunner, QUALITY_FIRST_AGENT_PROFILES } from "./helpers.js";
 
 describe("Prtisan manifest", () => {
   test("accepts the versioned, explicit runtime contract", () => {
@@ -29,6 +29,7 @@ describe("Prtisan manifest", () => {
     expect(loaded.manifest.verification.commands[0]?.name).toBe("test");
     expect(loaded.manifest.limits.maxRepairCandidates).toBe(3);
     expect(loaded.manifest.limits.maxCandidatesPerCause).toBe(2);
+    expect(loaded.manifest.codex.roles).toEqual(QUALITY_FIRST_AGENT_PROFILES);
   });
 
   test("requires exactly one profile for every supported role", () => {
@@ -119,14 +120,7 @@ describe("Prtisan manifest", () => {
       contract: legacy.contract,
       limits: legacy.limits,
     });
-    expect(Object.keys(upgraded.codex.roles)).toHaveLength(7);
-    expect(
-      Object.values(upgraded.codex.roles).every(
-        (profile) =>
-          profile.model === "gpt-5.6-sol" &&
-          profile.reasoningEffort === "medium"
-      )
-    ).toBe(true);
+    expect(upgraded.codex.roles).toEqual(QUALITY_FIRST_AGENT_PROFILES);
   });
 });
 

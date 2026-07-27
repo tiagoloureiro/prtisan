@@ -12,10 +12,10 @@ materially different responsibilities and made cost, quality, and latency
 tradeoffs difficult to measure or reproduce. A production heuristic could also
 make the same frozen validation snapshot run with a different effort.
 
-Model and rate-card changes are inevitable, but repository policy must remain
-reviewable and validation must remain deterministic. Benchmark prompts, source,
-gold labels, and outputs from private repositories must not leak into the target
-repository or public reports.
+Repository policy must remain reviewable and validation must remain
+deterministic. Defaults should favor quality for open-ended judgment and risky
+mutations, then reduce runtime and cost for narrow tasks protected by
+deterministic checks.
 
 ## Decision
 
@@ -32,38 +32,29 @@ Prtisan defines exactly seven agent roles:
 Manifest schema v2 maps each role to one fixed `{ model, reasoningEffort }`
 profile. Every Sandcastle invocation explicitly receives its role's exact
 profile. The role and profile are part of validation-policy and review-cache
-identity. Rate-card versions are reporting inputs and do not affect validation
 identity.
 
-Production never chooses profiles dynamically, runs canaries, or writes policy
-from telemetry. Valid schema-v1 policy produces a reviewed setup migration;
-malformed policy remains an error. Generated schema-v2 policy initially assigns
-Sol-medium to every role.
+Generated schema-v2 policy uses:
 
-A maintainer-only staged tournament may recommend a different profile. It uses
-a frozen 105-case corpus, pre-authored gold labels, hard disqualification rules,
-a fixed-seed paired bootstrap, latency gates, and lowest median Codex-credit
-cost. Inconclusive evidence retains Sol-medium. Updating a repository manifest
-is a separate human-reviewed setup PR.
+- Sol-medium for standards review, specification review, validation repair, and
+  merge-state repair.
+- Terra-medium for repair verification and CI repair.
+- Sol-high for restack conflict repair.
 
-Production telemetry is written to a separate `0600` XDG SQLite database and is
-limited to role/profile, token counts, calculated credits, agent duration,
-retry count, cache use, and terminal outcome. It structurally excludes prompts,
-paths, source, findings, outputs, and patches.
+Production never chooses profiles dynamically, runs canaries, or rewrites
+repository policy. Valid schema-v1 policy produces a reviewed setup migration
+with these defaults; malformed policy remains an error. Existing schema-v2
+manifests remain authoritative until changed through normal repository review.
 
 ## Consequences
 
 - Production routing is explicit, exhaustive, and reproducible.
-- Model changes invalidate the right policy/cache identities; rate-only changes
-  can reprice stored observations without rerunning models.
+- Model changes invalidate the right policy and review-cache identities.
 - Seven role profiles add manifest verbosity and require reviewed migration.
-- A cheaper model cannot be promoted from intuition or aggregate telemetry; it
-  must pass the frozen role-specific benchmark.
-- Private corpus maintenance and gold adjudication remain a deliberate
-  maintainer responsibility.
+- Default changes affect new setup manifests and reviewed schema-v1 upgrades,
+  not repositories that already own schema-v2 policy.
+- Repository maintainers may override any role profile explicitly.
 
-## References
+## Reference
 
-- [Model-routing methodology](../model-routing-methodology.md)
-- [Official Codex rate card](https://help.openai.com/en/articles/20001106-codex-rate-card.docx)
-- [OpenAI model selection guidance](https://developers.openai.com/api/docs/guides/latest-model)
+[OpenAI model selection guidance](https://developers.openai.com/api/docs/guides/latest-model)

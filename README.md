@@ -59,21 +59,21 @@ every supported agent role:
       },
       "specReview": { "model": "gpt-5.6-sol", "reasoningEffort": "medium" },
       "repairVerification": {
-        "model": "gpt-5.6-sol",
+        "model": "gpt-5.6-terra",
         "reasoningEffort": "medium"
       },
       "validationRepair": {
         "model": "gpt-5.6-sol",
         "reasoningEffort": "medium"
       },
-      "ciRepair": { "model": "gpt-5.6-sol", "reasoningEffort": "medium" },
+      "ciRepair": { "model": "gpt-5.6-terra", "reasoningEffort": "medium" },
       "mergeStateRepair": {
         "model": "gpt-5.6-sol",
         "reasoningEffort": "medium"
       },
       "restackConflictRepair": {
         "model": "gpt-5.6-sol",
-        "reasoningEffort": "medium"
+        "reasoningEffort": "high"
       }
     }
   }
@@ -86,16 +86,11 @@ automatic policy changes. A valid schema-v1 manifest creates a setup checkpoint
 and reviewed upgrade PR that preserves non-Codex settings. Malformed policy is a
 hard error.
 
-Production records privacy-minimal invocation telemetry in a separate
-permission-restricted SQLite database below
-`$XDG_STATE_HOME/prtisan/repositories/<repository-key>/telemetry`. It stores the
-role, exact profile, token counts, calculated credits, agent duration, retry
-count, cache use, and terminal outcome. It never stores prompts, source paths,
-findings, output, or patches.
-
-All roles initially retain Sol-medium. A cheaper profile may replace it only
-after a maintainer approves a frozen-corpus report that passes every quality and
-latency gate.
+Generated policy favors quality first, runtime second, and cost third. Sol-medium
+handles reviews, validation repair, and merge-state repair; Terra-medium handles
+the narrower repair-verification and CI-repair loops; restack conflict repair
+uses Sol-high. Existing schema-v2 manifests remain authoritative and are never
+rewritten automatically.
 
 ## Safety model
 
@@ -123,22 +118,6 @@ bun run typecheck
 bun test
 bun run build
 ```
-
-Model evaluation is a maintainer-only development command and is not part of the
-published `prtisan` CLI:
-
-```text
-bun run eval:models validate-corpus
-bun run eval:models run --cap 5000
-bun run eval:models report --output evals/model-routing/latest-report.json
-```
-
-The combined 105-case corpus and private raw artifacts live below
-`$XDG_DATA_HOME/prtisan/model-evaluation` with restrictive permissions. The
-SQLite run journal lives below `$XDG_STATE_HOME/prtisan/model-evaluation`.
-`report` emits redacted JSON and Markdown aggregates suitable for review. When
-only the rate card changes, rerun `report` to reprice stored token measurements;
-do not rerun model calls.
 
 See [the full documentation](docs/index.md) and
 [ADR 0008](docs/adr/0008-fixed-agent-role-model-profiles.md).

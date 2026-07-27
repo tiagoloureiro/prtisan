@@ -1,9 +1,7 @@
 import { unlink } from "node:fs/promises";
 import { z } from "zod";
 
-import type { AgentTelemetrySink } from "./agent-telemetry.js";
 import { reviewSandboxBranch } from "./branching.js";
-import { aggregateTokenUsage, calculateCreditCost } from "./codex-rate-card.js";
 import { BunCommandRunner, type CommandRunner } from "./exec.js";
 import { ensureDir, pathExists, readText, writeText } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
@@ -67,11 +65,7 @@ const RepairVerificationOutputSchema = z.object({
 });
 
 export class AgentOutputError extends Error {
-  constructor(
-    message: string,
-    options?: ErrorOptions,
-    readonly invocation?: AgentRunOutcome["invocation"]
-  ) {
+  constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "AgentOutputError";
   }
@@ -201,8 +195,7 @@ export interface AgentRunner {
 
 export class SandcastleCodexRunner implements AgentRunner {
   constructor(
-    private readonly runner: CommandRunner = new BunCommandRunner(),
-    private readonly telemetry?: AgentTelemetrySink
+    private readonly runner: CommandRunner = new BunCommandRunner()
   ) {}
 
   async review(input: AgentReviewTask): Promise<ReviewReport> {
@@ -239,7 +232,6 @@ export class SandcastleCodexRunner implements AgentRunner {
       ...parseReviewReport(result.structuredOutput ?? result.stdout, run.axis),
       promptChars: result.promptChars,
       durationMs: result.durationMs,
-      invocation: result.invocation,
       rawOutput: result.stdout,
       logFilePath: result.logFilePath,
     };
@@ -359,7 +351,6 @@ export class SandcastleCodexRunner implements AgentRunner {
       ),
       promptChars: result.promptChars,
       durationMs: result.durationMs,
-      invocation: result.invocation,
       rawOutput: result.stdout,
       logFilePath: result.logFilePath,
     };
@@ -490,44 +481,7 @@ export class SandcastleCodexRunner implements AgentRunner {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const infrastructure = isPreAgentInfrastructureFailure(message);
-      const failureIterations = Array.isArray(
-        (error as { iterations?: unknown }).iterations
-      )
-        ? (
-            error as {
-              iterations: readonly { usage?: AgentRunOutcome["usage"] }[];
-            }
-          ).iterations
-        : [];
-      const failureUsage = aggregateTokenUsage(
-        failureIterations.map((iteration) => iteration.usage)
-      );
-      const failureInvocation = {
-        role: input.role,
-        profile,
-        promptChars: input.prompt.length,
-        agentDurationMs: Date.now() - startedAt,
-        iterations: failureIterations.length,
-        retryCount: Math.max(0, failureIterations.length - 1),
-        cacheUsed: failureUsage
-          ? failureUsage.cacheReadInputTokens > 0
-          : undefined,
-        usage: failureUsage,
-        creditCost: failureUsage
-          ? calculateCreditCost(profile.model, failureUsage)
-          : undefined,
-      };
-      await this.telemetry
-        ?.record({
-          cwd: input.cwd,
-          invocation: failureInvocation,
-          terminalOutcome: infrastructure
-            ? "infrastructure_failed"
-            : "execution_failed",
-        })
-        .catch(() => undefined);
-      if (infrastructure) {
+      if (isPreAgentInfrastructureFailure(message)) {
         throw new AgentInfrastructureError(message, { cause: error });
       }
       if (
@@ -536,11 +490,7 @@ export class SandcastleCodexRunner implements AgentRunner {
           message
         )
       ) {
-        throw new AgentOutputError(
-          message,
-          { cause: error },
-          failureInvocation
-        );
+        throw new AgentOutputError(message, { cause: error });
       }
       throw new AgentExecutionError(message, { cause: error });
     } finally {
@@ -552,25 +502,7 @@ export class SandcastleCodexRunner implements AgentRunner {
     }
 
     const structuredOutput = "output" in result ? result.output : undefined;
-    const iterations = Array.isArray(result.iterations)
-      ? result.iterations
-      : [];
-    const iteration = iterations.at(-1);
-    const usage = aggregateTokenUsage(
-      iterations.map((item: { usage?: AgentRunOutcome["usage"] }) => item.usage)
-    );
-    const durationMs = Date.now() - startedAt;
-    const invocation = {
-      role: input.role,
-      profile,
-      promptChars: input.prompt.length,
-      agentDurationMs: durationMs,
-      iterations: iterations.length,
-      retryCount: Math.max(0, iterations.length - 1),
-      cacheUsed: usage ? usage.cacheReadInputTokens > 0 : undefined,
-      usage,
-      creditCost: usage ? calculateCreditCost(profile.model, usage) : undefined,
-    };
+    const iteration = result.iterations?.at?.(-1);
     const reportedCommits = Array.isArray(result.commits)
       ? result.commits
           .map((commit: { sha?: string }) => commit.sha)
@@ -594,14 +526,6 @@ export class SandcastleCodexRunner implements AgentRunner {
     ) {
       await unlink(iteration.sessionFilePath).catch(() => undefined);
     }
-    await this.telemetry
-      ?.record({
-        cwd: input.cwd,
-        invocation,
-        terminalOutcome: "completed",
-      })
-      .catch(() => undefined);
-
     return {
       branch: result.branch ?? input.branch,
       commits,
@@ -613,9 +537,8 @@ export class SandcastleCodexRunner implements AgentRunner {
           ? iteration?.sessionId
           : undefined,
       promptChars: input.prompt.length,
-      durationMs,
-      usage,
-      invocation,
+      durationMs: Date.now() - startedAt,
+      usage: iteration?.usage,
     };
   }
 }
