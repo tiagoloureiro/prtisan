@@ -103,7 +103,7 @@ export class DeclaredRuntimeProvider implements RuntimeProvider {
     const image = await this.baseImages.ensure({
       cwd: input.cwd,
       config: input.config,
-      ref: input.ref,
+      ref: `${input.config.remote}/${input.config.targetBranch}`,
     });
     const profileValue = {
       kind: "image" as const,

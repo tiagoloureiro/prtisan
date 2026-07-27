@@ -126,7 +126,7 @@ async function readOwner(lockPath: string): Promise<LeaseOwner | undefined> {
   }
 }
 
-function processIsAlive(pid: number): boolean {
+export function processIsAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);

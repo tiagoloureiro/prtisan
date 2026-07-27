@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -8,6 +8,7 @@ import {
   type ResolvedDockerImage,
 } from "@/docker-image.js";
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
+import { DeclaredRuntimeProvider } from "@/runtime.js";
 
 import { testConfig } from "./helpers.js";
 
@@ -109,6 +110,34 @@ describe("Docker base image lifecycle", () => {
       "invalid managed build result image ID"
     );
   });
+
+  test("builds reviewed runtime policy when a PR predates setup", async () => {
+    const cwd = await temporaryDirectory();
+    const imageId =
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const runner = new HistoricalRuntimeRunner(imageId);
+    const defaults = testConfig();
+    const config = testConfig({
+      runtime: {
+        ...defaults.runtime,
+        verificationMode: "explicit",
+        verification: [
+          { name: "Check", command: "bun test", timeoutMs: 60_000 },
+        ],
+      },
+    });
+    const provider = new DeclaredRuntimeProvider(
+      new DockerBaseImageManager(runner)
+    );
+
+    const runtime = await provider.prepare({
+      cwd,
+      ref: "before-setup-head",
+      config,
+    });
+
+    expect(runtime.imageName).toBe(imageId);
+  });
 });
 
 class ManagedImageRunner implements CommandRunner {
@@ -172,6 +201,71 @@ class MissingExternalImageRunner implements CommandRunner {
       exitCode: 1,
     };
   }
+}
+
+class HistoricalRuntimeRunner implements CommandRunner {
+  constructor(private readonly imageId: string) {}
+
+  async run(
+    command: string,
+    args: readonly string[] = [],
+    options?: CommandOptions
+  ): Promise<CommandResult> {
+    if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+      const sourceDirectory = args[3];
+      const ref = args[4];
+      if (sourceDirectory) {
+        await mkdir(sourceDirectory, { recursive: true });
+        if (ref === "origin/main") {
+          await mkdir(join(sourceDirectory, ".prtisan"), { recursive: true });
+          await writeFile(
+            join(sourceDirectory, ".prtisan", "Dockerfile"),
+            "FROM scratch\n"
+          );
+        }
+      }
+      return commandResult(command, args, options);
+    }
+    if (command === "docker" && args[0] === "build") {
+      const dockerfile = args[args.indexOf("-f") + 1];
+      try {
+        await access(join(options?.cwd ?? "", dockerfile ?? ""));
+      } catch {
+        return commandResult(
+          command,
+          args,
+          options,
+          "",
+          1,
+          "resolve : lstat .prtisan: no such file or directory"
+        );
+      }
+      const iidFile = args[args.indexOf("--iidfile") + 1];
+      if (iidFile) await writeFile(iidFile, `${this.imageId}\n`);
+      return commandResult(command, args, options);
+    }
+    if (command === "docker" && args[0] === "image" && args[1] === "inspect") {
+      return commandResult(command, args, options, `${this.imageId}\n`);
+    }
+    return commandResult(command, args, options);
+  }
+}
+
+function commandResult(
+  command: string,
+  args: readonly string[],
+  options?: CommandOptions,
+  stdout = "",
+  exitCode = 0,
+  stderr = ""
+): CommandResult {
+  return {
+    command: [command, ...args],
+    cwd: options?.cwd,
+    stdout,
+    stderr,
+    exitCode,
+  };
 }
 
 async function temporaryDirectory(): Promise<string> {

@@ -29,6 +29,8 @@ human-reviewed setup PR. The PR adds:
 
 Prtisan never merges the setup PR. After a human merges it, rerun the same
 command. Repeated onboarding does not create duplicate setup PRs or commits.
+Existing pull requests whose base commits predate setup are planned with the
+reviewed target-branch manifest and do not require manual rebasing.
 A valid schema-v1 manifest also produces this setup checkpoint; the reviewed PR
 preserves all non-Codex policy while replacing legacy review/repair settings
 with the seven schema-v2 role profiles. Malformed manifests fail closed.
@@ -50,15 +52,19 @@ prtisan export <plan-id>
 ```
 
 Planning reads every open PR, including drafts. It accepts independent roots and
-single-parent chains. Cycles and multi-parent joins are invalid. Each attempt
-freezes head/base SHAs, intent, base policy, required checks, reviews, runtime,
-and Codex configuration. An external edit that changes this authority makes the
-plan stale.
+single-parent chains. Cycles and multi-parent joins are invalid. Each plan
+freezes the reviewed target-branch manifest and runtime; each attempt freezes
+head/base SHAs, intent, base standards, required checks, and reviews. An
+external edit that changes this authority makes the plan stale.
 
-Applying acquires one recoverable repository lease. Every GitHub or Git mutation
-is preceded by journaled intent and an idempotency key, then followed by a
-journaled result. Re-running the same plan resumes effects without duplicate
-commits, comments, draft promotions, retargets, or merges.
+Applying acquires one recoverable repository lease whose owner includes the
+local process ID. A later invocation immediately reclaims leases left by dead
+processes or older UUID-only versions. A genuinely live concurrent invocation
+produces a `waiting_external` checkpoint with its PID and the normal resume
+command. Every GitHub or Git mutation is preceded by journaled intent and an
+idempotency key, then followed by a journaled result. Re-running the same plan
+resumes effects without duplicate commits, comments, draft promotions,
+retargets, or merges.
 
 `run` selects the newest journaled plan for the canonical repository. It resumes
 checkpointed and partially completed plans, creates fresh authority after a
@@ -123,6 +129,10 @@ state, blockers, and evidence.
 
 Exports are redacted and content-addressed. Target repositories contain only the
 tracked manifest and Dockerfile, never credentials or execution records.
+
+When developing Prtisan, `bun run src/index.ts ...` executes source directly.
+The globally linked `prtisan` command executes `dist/index.js`; run
+`bun run link-bin` after source changes to rebuild and refresh it.
 
 ## GitHub Issue And PR Conventions
 

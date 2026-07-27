@@ -37,6 +37,11 @@ snapshot. `apply` executes or resumes that snapshot idempotently. `status`
 explains the durable checkpoint and next action. `export` writes redacted,
 content-addressed evidence.
 
+Existing pull requests do not need to be rebased onto the setup commit.
+After the setup PR merges, `run` applies the reviewed target-branch policy to
+the complete open train, including pull requests whose base commits predate
+Prtisan.
+
 Authenticate the dedicated home once before applying a train:
 
 ```text
@@ -96,8 +101,9 @@ rewritten automatically.
 
 - The whole open train is the unit of authority. Roots and single-parent stacks
   are supported; cycles and multi-parent joins fail before mutation.
-- Policy, runtime, checks, review state, and intent contracts are frozen from
-  each PR's base snapshot. Policy changes apply only after merge.
+- Repository policy and runtime are frozen from the reviewed target-branch
+  snapshot. PR code, standards, checks, review state, and intent contracts
+  remain pinned to each PR snapshot. Policy changes apply only after merge.
 - Codex blockers and repairs require a linked issue or the configured structured
   PR-body sections. Deterministic checks and human review still apply to every PR.
 - All Codex work and candidate verification runs inside Docker Sandcastle.
@@ -118,6 +124,11 @@ bun run typecheck
 bun test
 bun run build
 ```
+
+`bun run src/index.ts ...` executes the current TypeScript source and does not
+need a build. The globally installed `prtisan` command executes `dist/index.js`;
+after changing source, run `bun run link-bin` once to rebuild and refresh that
+linked command.
 
 See [the full documentation](docs/index.md) and
 [ADR 0008](docs/adr/0008-fixed-agent-role-model-profiles.md).

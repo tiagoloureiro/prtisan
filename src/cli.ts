@@ -173,6 +173,17 @@ export function formatRunResult(
     ].join("\n");
   }
 
+  if (result.kind === "busy") {
+    return [
+      `Prtisan · ${result.repo}`,
+      `Plan: ${result.planId}`,
+      `State: ${result.outcome}`,
+      `Active run: PID ${result.activeRun.pid} (started ${result.activeRun.startedAt})`,
+      `Blocker: ${result.blocker.message}`,
+      `Resume: ${resumeCommand}`,
+    ].join("\n");
+  }
+
   const lines = [
     `Prtisan · ${result.repo}`,
     `Plan: ${result.planId}`,
@@ -195,7 +206,7 @@ export function formatRunResult(
 }
 
 export function runExitCode(result: WorkflowRunResult): number {
-  if (result.kind === "setup") return 2;
+  if (result.kind === "setup" || result.kind === "busy") return 2;
   if (result.snapshot.outcome === "completed") return 0;
   if (
     result.snapshot.outcome === "infrastructure_failed" ||

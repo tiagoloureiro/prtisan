@@ -35,7 +35,7 @@ export async function writeScaffoldFiles(
     await writeManagedFile(
       root,
       PRTISAN_MANIFEST_PATH,
-      `${JSON.stringify(config, null, 2)}\n`,
+      serializeManifest(config),
       options
     )
   );
@@ -49,6 +49,23 @@ export async function writeScaffoldFiles(
   );
 
   return { files };
+}
+
+function serializeManifest(config: PrtisanManifest): string {
+  const contents = JSON.stringify(config, null, 2);
+  const sections = `[${config.contract.prBodySections
+    .map((section) => JSON.stringify(section))
+    .join(", ")}]`;
+  const expandedSections = JSON.stringify(
+    config.contract.prBodySections,
+    null,
+    2
+  ).replaceAll("\n", "\n    ");
+
+  return `${contents.replace(
+    `    "prBodySections": ${expandedSections}`,
+    `    "prBodySections": ${sections}`
+  )}\n`;
 }
 
 export function summarizeScaffold(

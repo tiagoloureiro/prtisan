@@ -36,9 +36,13 @@ describe("Prtisan setup scaffold", () => {
       [".prtisan/manifest.json", "created"],
       [".prtisan/Dockerfile", "created"],
     ]);
-    const manifest = await readJson<PrtisanManifest>(
-      `${root}/.prtisan/manifest.json`
+    const manifestPath = `${root}/.prtisan/manifest.json`;
+    const manifestContents = await readText(manifestPath);
+    const manifest = await readJson<PrtisanManifest>(manifestPath);
+    expect(manifestContents).toContain(
+      '  "contract": {\n    "prBodySections": ["Summary", "Acceptance criteria"]\n  },'
     );
+    expect(manifestContents.endsWith("\n")).toBe(true);
     expect(manifest).toMatchObject({
       schemaVersion: 2,
       targetBranch: "main",

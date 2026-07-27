@@ -543,6 +543,51 @@ describe("GitHubClient", () => {
     ).toBe(true);
   });
 
+  test("reuses the open setup PR for the managed branch", async () => {
+    const runner = new OpenBranchPrRunner();
+    const client = new GitHubClient(runner, "/repo");
+
+    const first = await client.createOrUpdatePullRequest({
+      repo: "o/r",
+      title: "Configure Prtisan",
+      body: "body",
+      baseBranch: "main",
+      headBranch: "prtisan/setup",
+    });
+    const second = await client.createOrUpdatePullRequest({
+      repo: "o/r",
+      title: "Configure Prtisan",
+      body: "body",
+      baseBranch: "main",
+      headBranch: "prtisan/setup",
+    });
+
+    expect([first.number, second.number]).toEqual([213, 213]);
+    expect([first.url, second.url]).toEqual([
+      "https://github.com/o/r/pull/213",
+      "https://github.com/o/r/pull/213",
+    ]);
+    expect(
+      runner.calls.filter(
+        (call) =>
+          call.command === "gh" &&
+          call.args[0] === "pr" &&
+          call.args[1] === "create"
+      )
+    ).toHaveLength(0);
+  });
+
+  test("falls back to a complete local diff when GitHub rejects a large PR", async () => {
+    const runner = new OversizedDiffRunner();
+    const client = new GitHubClient(runner, "/repo");
+
+    const diff = await client.getPullRequestDiff("o/r", 118);
+
+    expect(diff).toBe(
+      "diff --git a/src/large.ts b/src/large.ts\n+complete local diff\n"
+    );
+  });
+
   test("blocks merge when required review is still pending", () => {
     expect(
       isPullRequestGreen(
@@ -680,6 +725,88 @@ class ClosedBranchPrRunner extends FakeRunner {
     }
 
     return super.run(command, args, options);
+  }
+}
+
+class OpenBranchPrRunner extends FakeRunner {
+  private readonly setupPr = pullRequest({
+    number: 213,
+    url: "https://github.com/o/r/pull/213",
+    headRefName: "prtisan/setup",
+    headRefOid: "setup-sha",
+  });
+
+  override async run(
+    command: string,
+    args: readonly string[] = [],
+    options?: CommandOptions
+  ): Promise<CommandResult> {
+    if (isSetupPrList(command, args)) {
+      this.calls.push({ command, args, options });
+      return result(command, args, options, JSON.stringify([this.setupPr]));
+    }
+    if (
+      command === "gh" &&
+      args[0] === "pr" &&
+      (args[1] === "edit" || args[1] === "view")
+    ) {
+      this.calls.push({ command, args, options });
+      return result(
+        command,
+        args,
+        options,
+        args[1] === "view" ? JSON.stringify(this.setupPr) : ""
+      );
+    }
+    return super.run(command, args, options);
+  }
+}
+
+class OversizedDiffRunner extends FakeRunner {
+  override async run(
+    command: string,
+    args: readonly string[] = [],
+    options?: CommandOptions
+  ): Promise<CommandResult> {
+    this.calls.push({ command, args, options });
+    if (command === "gh" && args[0] === "pr" && args[1] === "diff") {
+      return result(
+        command,
+        args,
+        options,
+        "",
+        1,
+        "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)\nPullRequest.diff too_large"
+      );
+    }
+    if (command === "gh" && args[0] === "pr" && args[1] === "view") {
+      return result(
+        command,
+        args,
+        options,
+        JSON.stringify(
+          pullRequest({
+            number: 118,
+            baseRefName: "main",
+            baseRefOid: "base-sha",
+            headRefName: "large-pr",
+            headRefOid: "head-sha",
+          })
+        )
+      );
+    }
+    if (command === "git" && args[0] === "fetch") {
+      return result(command, args, options, "");
+    }
+    if (command === "git" && args[0] === "diff") {
+      return result(
+        command,
+        args,
+        options,
+        "diff --git a/src/large.ts b/src/large.ts\n+complete local diff\n"
+      );
+    }
+    throw new Error(`Unexpected command: ${command} ${args.join(" ")}`);
   }
 }
 

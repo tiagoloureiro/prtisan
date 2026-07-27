@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 
 import { ensureDir } from "@/fs.js";
 import { dirname } from "@/path.js";
+import { processIsAlive } from "@/validation-lease.js";
 
 import { reduceWorkflow } from "./state.js";
 import type { TrainPlan, WorkflowEvent, WorkflowSnapshot } from "./types.js";
@@ -14,8 +15,26 @@ export interface EffectRecord {
 
 export interface JournalLease {
   readonly repositoryKey: string;
-  readonly owner: string;
+  readonly owner: JournalLeaseOwner;
   release(): Promise<void>;
+}
+
+export interface JournalLeaseOwner {
+  readonly token: string;
+  readonly pid: number;
+  readonly createdAt: string;
+}
+
+export class WorkflowLeaseBusyError extends Error {
+  constructor(
+    readonly ownerPid: number,
+    readonly ownerCreatedAt: string
+  ) {
+    super(
+      `Another Prtisan run is active for this repository (PID ${ownerPid}, started ${ownerCreatedAt}).`
+    );
+    this.name = "WorkflowLeaseBusyError";
+  }
 }
 
 export interface WorkflowJournal {
@@ -35,7 +54,7 @@ export interface WorkflowJournal {
   ): Promise<void>;
   acquire(
     repositoryKey: string,
-    owner: string,
+    owner: JournalLeaseOwner,
     now: number,
     ttlMs: number
   ): Promise<JournalLease>;
@@ -156,10 +175,11 @@ export class SqliteWorkflowJournal implements WorkflowJournal {
 
   async acquire(
     repositoryKey: string,
-    owner: string,
+    owner: JournalLeaseOwner,
     now: number,
     ttlMs: number
   ): Promise<JournalLease> {
+    const encodedOwner = JSON.stringify(owner);
     const transaction = this.database.transaction(() => {
       const current = this.database
         .query<{ owner: string; acquired_at: number }, [string]>(
@@ -168,18 +188,22 @@ export class SqliteWorkflowJournal implements WorkflowJournal {
         .get(repositoryKey);
       if (
         current &&
-        current.owner !== owner &&
+        current.owner !== encodedOwner &&
         now - current.acquired_at < ttlMs
       ) {
-        throw new Error(
-          `Another prtisan apply owns ${repositoryKey} (owner ${current.owner}).`
-        );
+        const currentOwner = parseLeaseOwner(current.owner);
+        if (currentOwner && processIsAlive(currentOwner.pid)) {
+          throw new WorkflowLeaseBusyError(
+            currentOwner.pid,
+            currentOwner.createdAt
+          );
+        }
       }
       this.database
         .query(
           "INSERT INTO leases (repository_key, owner, acquired_at) VALUES (?, ?, ?) ON CONFLICT(repository_key) DO UPDATE SET owner = excluded.owner, acquired_at = excluded.acquired_at"
         )
-        .run(repositoryKey, owner, now);
+        .run(repositoryKey, encodedOwner, now);
     });
     transaction();
 
@@ -189,7 +213,7 @@ export class SqliteWorkflowJournal implements WorkflowJournal {
       release: async () => {
         this.database
           .query("DELETE FROM leases WHERE repository_key = ? AND owner = ?")
-          .run(repositoryKey, owner);
+          .run(repositoryKey, encodedOwner);
       },
     };
   }
@@ -242,7 +266,7 @@ export class InMemoryWorkflowJournal implements WorkflowJournal {
   private readonly effects = new Map<string, EffectRecord>();
   private readonly leases = new Map<
     string,
-    { readonly owner: string; readonly acquiredAt: number }
+    { readonly owner: JournalLeaseOwner; readonly acquiredAt: number }
   >();
 
   async savePlan(plan: TrainPlan, event: WorkflowEvent): Promise<void> {
@@ -306,27 +330,50 @@ export class InMemoryWorkflowJournal implements WorkflowJournal {
 
   async acquire(
     repositoryKey: string,
-    owner: string,
+    owner: JournalLeaseOwner,
     now: number,
     ttlMs: number
   ): Promise<JournalLease> {
     const current = this.leases.get(repositoryKey);
     if (
       current &&
-      current.owner !== owner &&
-      now - current.acquiredAt < ttlMs
+      current.owner.token !== owner.token &&
+      now - current.acquiredAt < ttlMs &&
+      processIsAlive(current.owner.pid)
     ) {
-      throw new Error(`Another prtisan apply owns ${repositoryKey}.`);
+      throw new WorkflowLeaseBusyError(
+        current.owner.pid,
+        current.owner.createdAt
+      );
     }
     this.leases.set(repositoryKey, { owner, acquiredAt: now });
     return {
       repositoryKey,
       owner,
       release: async () => {
-        if (this.leases.get(repositoryKey)?.owner === owner) {
+        if (this.leases.get(repositoryKey)?.owner.token === owner.token) {
           this.leases.delete(repositoryKey);
         }
       },
     };
+  }
+}
+
+function parseLeaseOwner(value: string): JournalLeaseOwner | undefined {
+  try {
+    const owner = JSON.parse(value) as Partial<JournalLeaseOwner>;
+    if (
+      typeof owner.token !== "string" ||
+      owner.token.length === 0 ||
+      !Number.isInteger(owner.pid) ||
+      (owner.pid ?? 0) <= 0 ||
+      typeof owner.createdAt !== "string" ||
+      !Number.isFinite(new Date(owner.createdAt).getTime())
+    ) {
+      return undefined;
+    }
+    return owner as JournalLeaseOwner;
+  } catch {
+    return undefined;
   }
 }

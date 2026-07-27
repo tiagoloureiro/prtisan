@@ -492,13 +492,44 @@ export class GitHubClient {
   }
 
   async getPullRequestDiff(repo: string, pullNumber: number): Promise<string> {
-    const result = await mustRun(
-      this.runner,
+    const remoteDiff = await this.runner.run(
       "gh",
       ["pr", "diff", String(pullNumber), "--repo", repo],
       { cwd: this.cwd }
     );
-    return result.stdout;
+    if (remoteDiff.exitCode === 0) return remoteDiff.stdout;
+    if (!isOversizedPullRequestDiff(remoteDiff)) {
+      throw new CommandError(remoteDiff);
+    }
+
+    const pullRequest = await this.getPullRequest(repo, pullNumber);
+    await mustRun(
+      this.runner,
+      "git",
+      [
+        "fetch",
+        "origin",
+        `refs/heads/${pullRequest.baseRefName}:refs/remotes/origin/${pullRequest.baseRefName}`,
+      ],
+      { cwd: this.cwd }
+    );
+    await mustRun(
+      this.runner,
+      "git",
+      ["fetch", "origin", `refs/pull/${pullNumber}/head`],
+      { cwd: this.cwd }
+    );
+    const localDiff = await mustRun(
+      this.runner,
+      "git",
+      [
+        "diff",
+        "--no-ext-diff",
+        `${pullRequest.baseRefOid}...${pullRequest.headRefOid}`,
+      ],
+      { cwd: this.cwd }
+    );
+    return localDiff.stdout;
   }
 
   async createPullRequestReview(input: PullRequestReviewInput): Promise<void> {
@@ -787,6 +818,17 @@ export class GitHubClient {
       return [];
     }
   }
+}
+
+function isOversizedPullRequestDiff(result: {
+  readonly stdout: string;
+  readonly stderr: string;
+}): boolean {
+  const output = `${result.stderr}\n${result.stdout}`;
+  return (
+    output.includes("PullRequest.diff too_large") ||
+    output.includes("diff exceeded the maximum number of lines")
+  );
 }
 
 export function pullRequestReadinessBlockers(pr: PullRequest): string[] {

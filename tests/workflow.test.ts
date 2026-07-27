@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { defaultManifest, ManifestError } from "@/manifest.js";
 import { buildOpenPrGraph, type OpenPrGraph } from "@/open-pr-graph.js";
+import { stableDigest } from "@/validation-hardening.js";
 import { InMemoryArtifactStore } from "@/workflow/artifacts.js";
 import { InMemoryWorkflowJournal } from "@/workflow/journal.js";
 import type {
@@ -21,6 +22,77 @@ import {
 import { pullRequest } from "./helpers.js";
 
 describe("Prtisan workflow", () => {
+  test("returns a checkpoint when another live run owns the repository", async () => {
+    const journal = new InMemoryWorkflowJournal();
+    const createdAt = "2026-07-27T00:00:00.000Z";
+    const lease = await journal.acquire(
+      stableDigest({ repo: "o/r", cwd: "/repo" }),
+      {
+        token: "live-owner",
+        pid: process.pid,
+        createdAt,
+      },
+      new Date(createdAt).getTime(),
+      defaultManifest().limits.applyLeaseTtlMs
+    );
+    const workflow = new PrtisanWorkflow(
+      journal,
+      new InMemoryArtifactStore(),
+      new FakeEnvironment(rootGraph()),
+      { now: () => new Date(createdAt) }
+    );
+
+    const result = await workflow.run({ cwd: "/repo" });
+
+    expect(result).toMatchObject({
+      kind: "busy",
+      cwd: "/repo",
+      repo: "o/r",
+      outcome: "waiting_external",
+      activeRun: {
+        pid: process.pid,
+        startedAt: createdAt,
+      },
+      blocker: {
+        category: "infrastructure",
+        external: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("live-owner");
+    expect(JSON.stringify(result)).not.toContain(
+      stableDigest({ repo: "o/r", cwd: "/repo" })
+    );
+    await lease.release();
+  });
+
+  test("resumes normally after a previous run's process died", async () => {
+    const journal = new InMemoryWorkflowJournal();
+    const createdAt = "2026-07-27T00:00:00.000Z";
+    await journal.acquire(
+      stableDigest({ repo: "o/r", cwd: "/repo" }),
+      {
+        token: "crashed-owner",
+        pid: 2_147_483_647,
+        createdAt,
+      },
+      new Date(createdAt).getTime(),
+      defaultManifest().limits.applyLeaseTtlMs
+    );
+    const workflow = new PrtisanWorkflow(
+      journal,
+      new InMemoryArtifactStore(),
+      new FakeEnvironment(rootGraph()),
+      { now: () => new Date(createdAt) }
+    );
+
+    const result = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(result.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1],
+    });
+  });
+
   test("runs a newly planned train through one workflow operation", async () => {
     const environment = new FakeEnvironment(rootGraph());
     const workflow = createWorkflow(environment);
@@ -160,6 +232,24 @@ describe("Prtisan workflow", () => {
     });
     expect(environment.setupCalls).toBe(1);
     expect(environment.mergeCalls).toEqual([]);
+  });
+
+  test("continues the train when setup becomes ready during the same run", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.inspectFailure = new SetupRequiredError(
+      ".prtisan/manifest.json is required on origin/main."
+    );
+    environment.setupBecomesReady = true;
+    const workflow = createWorkflow(environment);
+
+    const result = requireTrain(await workflow.run({ cwd: "/repo" }));
+
+    expect(result.snapshot).toMatchObject({
+      outcome: "completed",
+      merged: [1],
+    });
+    expect(environment.setupCalls).toBe(1);
+    expect(environment.mergeCalls).toEqual([1]);
   });
 
   test("does not replace an invalid repository policy with automatic setup", async () => {
@@ -416,6 +506,7 @@ class FakeEnvironment implements WorkflowEnvironment {
   failAfterFirstPromotion = false;
   failAfterFirstRestack = false;
   inspectFailure?: Error;
+  setupBecomesReady = false;
   setupCheckpoint?: {
     readonly cwd: string;
     readonly repo: string;
@@ -462,19 +553,25 @@ class FakeEnvironment implements WorkflowEnvironment {
         manifest,
         contents: JSON.stringify(manifest),
         digest: "manifest-digest",
-        ref: "base:.prtisan/manifest.json",
+        ref: "origin/main:.prtisan/manifest.json",
       },
-      requiredChecks: ["check"],
-      policyDigest: async () => "policy-digest",
+      pullRequestAuthority: async () => ({
+        requiredChecks: ["check"],
+        policyDigest: "policy-digest",
+      }),
     };
   }
 
   async setup() {
     this.setupCalls += 1;
+    if (this.setupBecomesReady) {
+      this.inspectFailure = undefined;
+      return { kind: "ready" as const };
+    }
     if (!this.setupCheckpoint) {
       throw new Error("Fake setup checkpoint was not configured.");
     }
-    return this.setupCheckpoint;
+    return { kind: "waiting" as const, ...this.setupCheckpoint };
   }
 
   async listOpenPullRequests(): Promise<

@@ -191,7 +191,7 @@ export async function loadManifestAtRef(input: {
   if (result.exitCode !== 0) {
     throw new ManifestMissingError(
       input.ref,
-      `${PRTISAN_MANIFEST_PATH} is required on ${input.ref}. Run \`prtisan init plan\` and merge its setup PR first.`
+      `${PRTISAN_MANIFEST_PATH} is required on ${input.ref}.`
     );
   }
   return parseManifest(result.stdout, `${input.ref}:${PRTISAN_MANIFEST_PATH}`);

@@ -11,8 +11,8 @@ selects the newest journaled plan, resumes durable work, or creates fresh
 authority after completion or staleness.
 
 Plan: An immutable snapshot of the complete open PR graph and the authority used
-to judge it, including head/base SHAs, intent contracts, policy, checks, review
-state, runtime, and Codex configuration.
+to judge it, including the reviewed target-branch policy and runtime plus each
+PR's head/base SHAs, intent contract, base standards, checks, and review state.
 
 Attempt: A journaled validation and integration lifecycle for one PR snapshot.
 Repair counters belong to the attempt and survive process restarts.

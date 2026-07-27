@@ -58,7 +58,7 @@ describe("Prtisan manifest", () => {
     );
   });
 
-  test("loads policy from the exact requested base ref", async () => {
+  test("loads policy from the exact requested target ref", async () => {
     const runner = new FakeRunner();
     runner.enqueue(
       JSON.stringify(
@@ -71,11 +71,11 @@ describe("Prtisan manifest", () => {
       )
     );
 
-    await loadManifestAtRef({ runner, cwd: "/repo", ref: "base-sha" });
+    await loadManifestAtRef({ runner, cwd: "/repo", ref: "target-sha" });
 
     expect(runner.calls[0]?.args).toEqual([
       "show",
-      "base-sha:.prtisan/manifest.json",
+      "target-sha:.prtisan/manifest.json",
     ]);
   });
 
@@ -83,9 +83,16 @@ describe("Prtisan manifest", () => {
     const runner = new FakeRunner();
     runner.enqueue("", 1, "not found");
 
-    await expect(
-      loadManifestAtRef({ runner, cwd: "/repo", ref: "base-sha" })
-    ).rejects.toBeInstanceOf(ManifestError);
+    const error = await loadManifestAtRef({
+      runner,
+      cwd: "/repo",
+      ref: "base-sha",
+    }).catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(ManifestError);
+    expect(error).toMatchObject({
+      message: ".prtisan/manifest.json is required on base-sha.",
+    });
   });
 
   test("distinguishes a valid v1 policy from malformed configuration", () => {

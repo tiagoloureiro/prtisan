@@ -152,4 +152,36 @@ describe("Prtisan CLI", () => {
       })
     ).toBe(1);
   });
+
+  test("renders live-run contention as a resumable checkpoint", () => {
+    const result: WorkflowRunResult = {
+      kind: "busy",
+      cwd: "/repo",
+      repo: "o/r",
+      planId: "plan-123",
+      outcome: "waiting_external",
+      activeRun: {
+        pid: 42,
+        startedAt: "2026-07-27T00:00:00.000Z",
+      },
+      blocker: {
+        category: "infrastructure",
+        message:
+          "Another Prtisan run is active for this repository (PID 42, started 2026-07-27T00:00:00.000Z).",
+        external: true,
+      },
+    };
+
+    expect(formatRunResult(result)).toBe(
+      [
+        "Prtisan · o/r",
+        "Plan: plan-123",
+        "State: waiting_external",
+        "Active run: PID 42 (started 2026-07-27T00:00:00.000Z)",
+        "Blocker: Another Prtisan run is active for this repository (PID 42, started 2026-07-27T00:00:00.000Z).",
+        "Resume: prtisan run --cwd /repo",
+      ].join("\n")
+    );
+    expect(runExitCode(result)).toBe(2);
+  });
 });

@@ -63,7 +63,9 @@
       <p>
         The normal command creates or reuses the setup PR, creates or resumes a
         frozen plan, and applies the train. Every checkpoint prints the same
-        command needed to resume.
+        command needed to resume. While setup is open it prints that PR's URL;
+        after merge it plans existing pull requests even when their base commits
+        predate Prtisan.
       </p>
       <h2>Advanced recovery</h2>
       <pre><code>prtisan plan --cwd /repo
@@ -71,9 +73,11 @@ prtisan apply &lt;plan-id&gt;
 prtisan status &lt;plan-id&gt;
 prtisan export &lt;plan-id&gt;</code></pre>
       <p>
-        An immutable plan freezes the complete open train. Applying it journals
-        every effect and can resume without duplicating mutations. Required
-        checks and human approvals remain hard gates.
+        An immutable plan freezes the reviewed target-branch policy and the
+        complete open train. PR code and standards remain pinned to each PR
+        snapshot. Applying the plan journals every effect and can resume without
+        duplicating mutations. Required checks and human approvals remain hard
+        gates.
       </p>
       <h2>GitHub Issue And PR Conventions</h2>
       <p>
@@ -103,6 +107,11 @@ prtisan export &lt;plan-id&gt;</code></pre>
         Journal and leases use the XDG state directory. Artifacts, caches, and a
         dedicated Prtisan Codex home use the XDG data directory. Credentials and
         execution records never live in the target repository.
+      </p>
+      <p>
+        Repository leases record the local owner process. A later run
+        automatically reclaims a dead or legacy UUID-only owner; a genuinely
+        live concurrent run reports a resumable waiting checkpoint with its PID.
       </p>
     </main>
   </body>

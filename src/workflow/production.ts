@@ -87,12 +87,26 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
       }
     );
     if (!result.pr) {
+      if (
+        result.mode === "github" &&
+        result.reason ===
+          "The Prtisan manifest and Dockerfile already exist on the target branch."
+      ) {
+        await this.fetch(plan.cwd, plan.targetBranch);
+        await loadManifestAtRef({
+          runner: this.runner,
+          cwd: plan.cwd,
+          ref: `origin/${plan.targetBranch}`,
+        });
+        return { kind: "ready" as const };
+      }
       throw new Error(
         result.reason ??
           "Prtisan setup did not create or locate a setup pull request."
       );
     }
     return {
+      kind: "waiting" as const,
       cwd: plan.cwd,
       repo: plan.repo,
       targetBranch: plan.targetBranch,
@@ -144,39 +158,15 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
       targetBranch: config.targetBranch,
       concurrency: config.concurrency.github,
     });
-    const requiredChecks = await github.getRequiredCheckNames(
-      config.repo,
-      config.targetBranch
-    );
-
     return {
       cwd,
       repo: config.repo,
       targetBranch: config.targetBranch,
       graph,
       manifest: loaded,
-      requiredChecks,
-      policyDigest: async (pr: PullRequest) => {
+      pullRequestAuthority: async (pr: PullRequest) => {
         await this.fetch(cwd, pr.baseRefName);
-        const diff = await github.getPullRequestDiff(config.repo, pr.number);
-        const standards = await git.readStandardsAtRef(
-          pr.baseRefOid,
-          changedFilesFromDiff(diff)
-        );
-        return stableDigest({
-          baseRefOid: pr.baseRefOid,
-          manifestDigest: loaded.digest,
-          standards,
-        });
-      },
-      authority: async (pr: PullRequest) => {
-        await this.fetch(cwd, pr.baseRefName);
-        const manifest = await loadManifestAtRef({
-          runner: this.runner,
-          cwd,
-          ref: pr.baseRefOid,
-        });
-        const checks = await github.getRequiredCheckNames(
+        const requiredChecks = await github.getRequiredCheckNames(
           config.repo,
           pr.baseRefName
         );
@@ -186,11 +176,10 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
           changedFilesFromDiff(diff)
         );
         return {
-          manifest,
-          requiredChecks: checks,
+          requiredChecks,
           policyDigest: stableDigest({
             baseRefOid: pr.baseRefOid,
-            manifestDigest: manifest.digest,
+            manifestDigest: loaded.digest,
             standards,
           }),
         };
@@ -203,6 +192,31 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
   }
 
   async planStaleness(plan: TrainPlan): Promise<WorkflowBlocker | undefined> {
+    if (
+      plan.pullRequests.some(
+        (pullRequest) => pullRequest.manifestDigest !== plan.manifestDigest
+      )
+    ) {
+      return {
+        category: "stale",
+        message:
+          "The frozen plan contains inconsistent repository policy and must be replanned.",
+        external: true,
+      };
+    }
+    await this.fetch(plan.cwd, plan.targetBranch);
+    const currentManifest = await loadManifestAtRef({
+      runner: this.runner,
+      cwd: plan.cwd,
+      ref: `origin/${plan.targetBranch}`,
+    });
+    if (currentManifest.digest !== plan.manifestDigest) {
+      return {
+        category: "stale",
+        message: `Repository policy on ${plan.targetBranch} changed after planning.`,
+        external: true,
+      };
+    }
     const context = this.context(plan);
     const graph = await loadOpenPrGraph({
       github: context.github,

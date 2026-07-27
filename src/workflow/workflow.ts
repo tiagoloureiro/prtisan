@@ -4,7 +4,7 @@ import type { PullRequest } from "@/types.js";
 import { stableDigest } from "@/validation-hardening.js";
 
 import type { ArtifactStore } from "./artifacts.js";
-import type { WorkflowJournal } from "./journal.js";
+import { type WorkflowJournal, WorkflowLeaseBusyError } from "./journal.js";
 import type {
   FrozenPullRequest,
   PreparationResult,
@@ -21,17 +21,14 @@ export interface WorkflowClock {
 }
 
 export interface WorkflowEnvironment {
-  setup?(input: PlanInput): Promise<WorkflowSetupCheckpoint>;
+  setup?(input: PlanInput): Promise<WorkflowSetupResult>;
   inspect(input: { readonly cwd: string }): Promise<{
     readonly cwd: string;
     readonly repo: string;
     readonly targetBranch: string;
     readonly graph: OpenPrGraph;
     readonly manifest: LoadedManifest;
-    readonly requiredChecks: readonly string[];
-    readonly policyDigest: (pr: PullRequest) => Promise<string>;
-    readonly authority?: (pr: PullRequest) => Promise<{
-      readonly manifest: LoadedManifest;
+    readonly pullRequestAuthority: (pr: PullRequest) => Promise<{
       readonly requiredChecks: readonly string[];
       readonly policyDigest: string;
     }>;
@@ -76,6 +73,10 @@ export interface WorkflowSetupCheckpoint {
   };
 }
 
+export type WorkflowSetupResult =
+  | ({ readonly kind: "waiting" } & WorkflowSetupCheckpoint)
+  | { readonly kind: "ready" };
+
 export interface WorkflowExport {
   readonly plan: TrainPlan;
   readonly snapshot: WorkflowSnapshot;
@@ -103,6 +104,18 @@ export type WorkflowRunResult =
       readonly setupPr: {
         readonly number: number;
         readonly url: string;
+      };
+      readonly blocker: WorkflowBlocker;
+    }
+  | {
+      readonly kind: "busy";
+      readonly cwd: string;
+      readonly repo: string;
+      readonly planId: string;
+      readonly outcome: "waiting_external";
+      readonly activeRun: {
+        readonly pid: number;
+        readonly startedAt: string;
       };
       readonly blocker: WorkflowBlocker;
     };
@@ -146,17 +159,23 @@ export class PrtisanWorkflow {
       if (!(error instanceof SetupRequiredError) || !this.environment.setup) {
         throw error;
       }
-      const checkpoint = await this.environment.setup(input);
-      return {
-        kind: "setup",
-        ...checkpoint,
-        outcome: "waiting_external",
-        blocker: {
-          category: "policy",
-          message: `Merge setup PR #${checkpoint.setupPr.number} so .prtisan/manifest.json reaches ${checkpoint.targetBranch}.`,
-          external: true,
-        },
-      };
+      const setup = await this.environment.setup(input);
+      if (setup.kind === "waiting") {
+        return {
+          kind: "setup",
+          cwd: setup.cwd,
+          repo: setup.repo,
+          targetBranch: setup.targetBranch,
+          setupPr: setup.setupPr,
+          outcome: "waiting_external",
+          blocker: {
+            category: "policy",
+            message: `Merge setup PR #${setup.setupPr.number} so .prtisan/manifest.json reaches ${setup.targetBranch}.`,
+            external: true,
+          },
+        };
+      }
+      candidate = await this.buildPlan(input);
     }
     const existing = await this.journal.latestPlan(candidate.repositoryKey);
     const existingSnapshot = existing
@@ -167,19 +186,39 @@ export class PrtisanWorkflow {
         ? existing
         : candidate;
     if (plan === candidate) await this.persistPlan(plan);
-    let snapshot = await this.apply(plan.id);
-    if (plan === existing && snapshot.outcome === "stale") {
-      plan = candidate;
-      await this.persistPlan(plan);
-      snapshot = await this.apply(plan.id);
+    try {
+      let snapshot = await this.apply(plan.id);
+      if (plan === existing && snapshot.outcome === "stale") {
+        plan = candidate;
+        await this.persistPlan(plan);
+        snapshot = await this.apply(plan.id);
+      }
+      return {
+        kind: "train",
+        cwd: plan.cwd,
+        repo: plan.repo,
+        planId: plan.id,
+        snapshot,
+      };
+    } catch (error) {
+      if (!(error instanceof WorkflowLeaseBusyError)) throw error;
+      return {
+        kind: "busy",
+        cwd: plan.cwd,
+        repo: plan.repo,
+        planId: plan.id,
+        outcome: "waiting_external",
+        activeRun: {
+          pid: error.ownerPid,
+          startedAt: error.ownerCreatedAt,
+        },
+        blocker: {
+          category: "infrastructure",
+          message: error.message,
+          external: true,
+        },
+      };
     }
-    return {
-      kind: "train",
-      cwd: plan.cwd,
-      repo: plan.repo,
-      planId: plan.id,
-      snapshot,
-    };
   }
 
   async plan(input: PlanInput): Promise<TrainPlan> {
@@ -199,17 +238,11 @@ export class PrtisanWorkflow {
         if (!node) throw new Error(`Open PR graph lost PR #${number}.`);
         const parent = node.blockers[0];
         const children = node.blocking;
-        const authority = inspected.authority
-          ? await inspected.authority(node.pr)
-          : {
-              manifest: inspected.manifest,
-              requiredChecks: inspected.requiredChecks,
-              policyDigest: await inspected.policyDigest(node.pr),
-            };
+        const authority = await inspected.pullRequestAuthority(node.pr);
         const contract = freezeContract(
           node.pr,
           node.issue,
-          authority.manifest.manifest
+          inspected.manifest.manifest
         );
         const policyDigest = authority.policyDigest;
         const checkStateDigest = stableDigest(node.pr.statusCheckRollup ?? []);
@@ -219,7 +252,7 @@ export class PrtisanWorkflow {
           baseRefOid: node.pr.baseRefOid,
           contractDigest: contract.digest,
           policyDigest,
-          manifestDigest: authority.manifest.digest,
+          manifestDigest: inspected.manifest.digest,
           requiredChecks: authority.requiredChecks,
           reviewDecision: node.pr.reviewDecision,
           checkStateDigest,
@@ -248,8 +281,8 @@ export class PrtisanWorkflow {
             : undefined,
           contract,
           policyDigest,
-          manifestDigest: authority.manifest.digest,
-          manifest: authority.manifest.manifest,
+          manifestDigest: inspected.manifest.digest,
+          manifest: inspected.manifest.manifest,
           requiredChecks: [...authority.requiredChecks].sort(),
           snapshotKey,
         } satisfies FrozenPullRequest;
@@ -293,12 +326,17 @@ export class PrtisanWorkflow {
 
   async apply(planId: string): Promise<WorkflowSnapshot> {
     const plan = await this.requirePlan(planId);
-    const owner = crypto.randomUUID();
+    const acquiredAt = this.clock.now();
+    const owner = {
+      token: crypto.randomUUID(),
+      pid: process.pid,
+      createdAt: acquiredAt.toISOString(),
+    };
     const manifest = plan.manifest as PrtisanManifest;
     const lease = await this.journal.acquire(
       plan.repositoryKey,
       owner,
-      this.clock.now().getTime(),
+      acquiredAt.getTime(),
       manifest.limits.applyLeaseTtlMs
     );
 
