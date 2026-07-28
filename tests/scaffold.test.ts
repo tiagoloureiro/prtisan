@@ -22,10 +22,11 @@ describe("Prtisan setup scaffold", () => {
     await writeText(
       `${root}/package.json`,
       JSON.stringify({
-        packageManager: "pnpm@10.0.0",
+        packageManager: "pnpm@11.13.1",
         scripts: { check: "biome check .", test: "bun test" },
       })
     );
+    await writeText(`${root}/.node-version`, "26.4.0\n");
 
     const result = await writeScaffoldFiles(root, {
       repo: "o/r",
@@ -62,9 +63,12 @@ describe("Prtisan setup scaffold", () => {
         (value: { command: string }) => value.command
       )
     ).toEqual(["pnpm check", "pnpm test"]);
-    expect(await readText(`${root}/.prtisan/Dockerfile`)).toContain(
-      "CODEX_HOME=/home/agent/.codex-prtisan"
+    const dockerfile = await readText(`${root}/.prtisan/Dockerfile`);
+    expect(dockerfile).toContain("FROM node:26.4.0-bookworm-slim");
+    expect(dockerfile).toContain(
+      "npm install --global @openai/codex@0.145.0 pnpm@11.13.1"
     );
+    expect(dockerfile).toContain("CODEX_HOME=/home/agent/.codex-prtisan");
   });
 
   test("does not overwrite an existing manifest without force", async () => {

@@ -67,6 +67,27 @@
         after merge it plans existing pull requests even when their base commits
         predate Prtisan.
       </p>
+      <h2>Projects and Conversations</h2>
+      <pre><code>prtisan tui [--cwd /repo]</code></pre>
+      <p>
+        The reconnectable TUI registers local Git Projects and keeps durable
+        multi-turn agent Conversations. Each Conversation edits an isolated
+        Docker worktree, mounts attachments read-only, checkpoints successful
+        turns, and can publish one pull request after operator confirmation.
+        Later turns require explicit republishing to update that PR. An
+        on-demand local Worker runs durable FIFO queues per Conversation while
+        allowing separate Conversations to run concurrently.
+      </p>
+      <h2>Safe cleanup</h2>
+      <pre><code>prtisan cleanup --cwd /repo
+prtisan cleanup --all --dry-run</code></pre>
+      <p>
+        Cleanup previews and revalidates Prtisan-owned containers, images,
+        worktrees, caches, logs, and sessions. A one-use Worker authorization
+        limits execution to the exact reviewed set. Active, dirty, shared,
+        external, unlabelled, and unpublished resources are preserved;
+        machine-wide Docker pruning is never used.
+      </p>
       <h2>Advanced recovery</h2>
       <pre><code>prtisan plan --cwd /repo
 prtisan apply &lt;plan-id&gt;
@@ -104,9 +125,11 @@ prtisan export &lt;plan-id&gt;</code></pre>
       </p>
       <h2>State</h2>
       <p>
-        Journal and leases use the XDG state directory. Artifacts, caches, and a
-        dedicated Prtisan Codex home use the XDG data directory. Credentials and
-        execution records never live in the target repository.
+        Journal, leases, the control database, and Worker jobs use the XDG state
+        directory. Artifacts, attachments, caches, and a dedicated Prtisan Codex
+        home use the XDG data directory. Global TUI defaults use the XDG config
+        directory. Credentials and execution records never live in the target
+        repository.
       </p>
       <p>
         Repository leases record the local owner process. A later run

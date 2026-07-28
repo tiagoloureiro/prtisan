@@ -86,8 +86,17 @@ export interface WorkflowBlocker {
     | "restack_conflict";
   readonly message: string;
   readonly evidence?: string;
+  readonly remediation?: WorkflowRemediation;
   readonly external: boolean;
 }
+
+export interface CodexLoginRemediation {
+  readonly kind: "codex_login";
+  readonly codexHome: string;
+  readonly command: string;
+}
+
+export type WorkflowRemediation = CodexLoginRemediation;
 
 export interface PullRequestAttempt {
   readonly number: number;

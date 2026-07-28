@@ -6,7 +6,9 @@ describe("package scripts", () => {
       new URL("../package.json", import.meta.url)
     ).json()) as { scripts: Record<string, string> };
 
-    expect(packageJson.scripts["link-bin"]).toBe("bun run build && bun link");
+    expect(packageJson.scripts["link-bin"]).toBe(
+      "bun run build && bun unlink && bun link"
+    );
   });
 
   test("clears the hook-local Git index before running nested-repository tests", async () => {

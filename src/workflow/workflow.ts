@@ -13,6 +13,7 @@ import type {
   TrainPlan,
   WorkflowBlocker,
   WorkflowEvent,
+  WorkflowRemediation,
   WorkflowSnapshot,
 } from "./types.js";
 
@@ -22,6 +23,8 @@ export interface WorkflowClock {
 
 export interface WorkflowEnvironment {
   setup?(input: PlanInput): Promise<WorkflowSetupResult>;
+  authenticate?(plan: TrainPlan): Promise<WorkflowAuthenticationResult>;
+  cleanup?(plan: TrainPlan): Promise<void>;
   inspect(input: { readonly cwd: string }): Promise<{
     readonly cwd: string;
     readonly repo: string;
@@ -77,6 +80,15 @@ export type WorkflowSetupResult =
   | ({ readonly kind: "waiting" } & WorkflowSetupCheckpoint)
   | { readonly kind: "ready" };
 
+export type WorkflowAuthenticationResult =
+  | {
+      readonly kind: "waiting";
+      readonly codexHome: string;
+      readonly loginCommand: string;
+      readonly message?: string;
+    }
+  | { readonly kind: "ready" };
+
 export interface WorkflowExport {
   readonly plan: TrainPlan;
   readonly snapshot: WorkflowSnapshot;
@@ -117,6 +129,14 @@ export type WorkflowRunResult =
         readonly pid: number;
         readonly startedAt: string;
       };
+      readonly blocker: WorkflowBlocker;
+    }
+  | {
+      readonly kind: "authentication";
+      readonly cwd: string;
+      readonly repo: string;
+      readonly outcome: "waiting_external";
+      readonly authentication: WorkflowRemediation;
       readonly blocker: WorkflowBlocker;
     };
 
@@ -170,12 +190,35 @@ export class PrtisanWorkflow {
           outcome: "waiting_external",
           blocker: {
             category: "policy",
-            message: `Merge setup PR #${setup.setupPr.number} so .prtisan/manifest.json reaches ${setup.targetBranch}.`,
+            message: `Merge setup PR #${setup.setupPr.number} so the reviewed Prtisan configuration reaches ${setup.targetBranch}.`,
             external: true,
           },
         };
       }
       candidate = await this.buildPlan(input);
+    }
+    const authentication = await this.environment.authenticate?.(candidate);
+    if (authentication?.kind === "waiting") {
+      const remediation = {
+        kind: "codex_login" as const,
+        codexHome: authentication.codexHome,
+        command: authentication.loginCommand,
+      };
+      return {
+        kind: "authentication",
+        cwd: candidate.cwd,
+        repo: candidate.repo,
+        outcome: "waiting_external",
+        authentication: remediation,
+        blocker: {
+          category: "credentials",
+          message:
+            authentication.message ??
+            "Codex authentication is required for Prtisan.",
+          remediation,
+          external: true,
+        },
+      };
     }
     const existing = await this.journal.latestPlan(candidate.repositoryKey);
     const existingSnapshot = existing
@@ -345,6 +388,7 @@ export class PrtisanWorkflow {
         type: "apply_started",
         at: this.at(),
       });
+      await this.environment.cleanup?.(plan);
       const stale = await this.findStaleness(plan);
       if (stale) return this.block(plan, "stale", stale);
 

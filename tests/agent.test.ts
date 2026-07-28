@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, mock, test } from "bun:test";
 
-import { parseReviewReport, SandcastleCodexRunner } from "@/agent.js";
+import {
+  AgentAuthenticationError,
+  AgentInfrastructureError,
+  parseReviewReport,
+  SandcastleCodexRunner,
+} from "@/agent.js";
 import { BunCommandRunner, mustRun } from "@/exec.js";
 import type { AgentRoleProfiles } from "@/types.js";
 
@@ -171,6 +176,62 @@ describe("SandcastleCodexRunner", () => {
         model: "gpt-5.6-terra",
         options: { effort: "high" },
       });
+    } finally {
+      sandcastleRun = defaultSandcastleRun;
+    }
+  });
+
+  test("classifies a Codex 401 as an authentication prerequisite", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-train-auth-test-"));
+    sandcastleRun = async () => {
+      throw new Error(
+        "codex exited with code 1: HTTP error: 401 Unauthorized, url: wss://api.openai.com/v1/responses"
+      );
+    };
+
+    try {
+      await expect(
+        new SandcastleCodexRunner().review({
+          kind: "pull-request",
+          cwd,
+          config: testConfig(),
+          runId: "test",
+          axis: "standards",
+          prNumber: 117,
+          branch: "branch-117",
+          baseBranch: "main",
+          diff: "",
+          relatedIssues: [],
+        })
+      ).rejects.toBeInstanceOf(AgentAuthenticationError);
+    } finally {
+      sandcastleRun = defaultSandcastleRun;
+    }
+  });
+
+  test("classifies pnpm bootstrap disk exhaustion as infrastructure", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "agent-train-disk-test-"));
+    sandcastleRun = async () => {
+      throw new Error(
+        "Command failed (exit 1): pnpm install --frozen-lockfile\nError: database or disk is full"
+      );
+    };
+
+    try {
+      await expect(
+        new SandcastleCodexRunner().review({
+          kind: "pull-request",
+          cwd,
+          config: testConfig(),
+          runId: "test",
+          axis: "standards",
+          prNumber: 117,
+          branch: "branch-117",
+          baseBranch: "main",
+          diff: "",
+          relatedIssues: [],
+        })
+      ).rejects.toBeInstanceOf(AgentInfrastructureError);
     } finally {
       sandcastleRun = defaultSandcastleRun;
     }

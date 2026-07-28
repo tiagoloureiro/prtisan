@@ -31,6 +31,48 @@ prtisan status <plan-id>
 prtisan export <plan-id>
 ```
 
+## Interactive Projects and Conversations
+
+```text
+prtisan tui [--cwd /path/to/repo]
+```
+
+The TUI is a global, reconnectable agent interface. It lists registered local
+Git Projects, keeps persistent multi-turn Conversations, streams agent activity,
+shows Run history and blockers, and exposes setup, policy, publication, export,
+and cleanup actions. Any local Git repository can be added; unavailable Docker,
+GitHub, authentication, or setup capabilities are shown as action blockers.
+
+Each Conversation freezes a base commit and model profile, then edits an
+isolated Prtisan branch/worktree inside Docker. Successful turns create
+checkpoint commits. Captured attachments are mounted read-only into the agent
+container. Publication pushes that branch and opens one pull request; later
+turns remain local until another confirmed Publish updates the same pull
+request.
+
+An on-demand per-user Worker owns durable queued turns and mutations. Turns run
+FIFO within one Conversation while separate Conversations can run concurrently;
+queued Turns survive a Worker restart. The Worker exits automatically after its
+idle timeout.
+
+## Safe cleanup
+
+```text
+prtisan cleanup --cwd /path/to/repo
+prtisan cleanup --all
+prtisan cleanup --all --only images --only caches --dry-run
+prtisan cleanup --all --yes --json
+```
+
+Cleanup previews all safe disposable categories by default: containers, images,
+worktrees, caches, logs, and reclaimable sessions. It deletes only resources
+whose Prtisan ownership can be proven and rechecks them immediately before
+removal. Confirmation authorizes only the exact reviewed candidate set through
+a short-lived, one-use Worker authorization. Active or dirty workspaces,
+external or unlabelled Docker resources, history, evidence, configuration,
+credentials, and unpublished work are always preserved and reported.
+Non-interactive deletion requires `--yes`.
+
 The setup PR contains `.prtisan/manifest.json` and `.prtisan/Dockerfile`; a
 human must review and merge it. `plan` is read-only and persists an immutable
 snapshot. `apply` executes or resumes that snapshot idempotently. `status`
@@ -42,11 +84,19 @@ After the setup PR merges, `run` applies the reviewed target-branch policy to
 the complete open train, including pull requests whose base commits predate
 Prtisan.
 
-Authenticate the dedicated home once before applying a train:
+`run` also owns the one-time Codex authentication step. In an interactive
+terminal it starts `codex login --device-auth` against Prtisan's dedicated
+Codex home, waits for authorization, verifies the same credentials inside the
+managed container, and continues the train in the same invocation.
+Non-interactive and `--json` runs return a credentials checkpoint with the exact
+fallback command:
 
 ```text
-CODEX_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/prtisan/codex-home" codex login
+CODEX_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/prtisan/codex-home" codex login --device-auth
 ```
+
+Prtisan never copies or mounts credentials from the operator's normal Codex
+home.
 
 ## Fixed role-based model routing
 
@@ -115,6 +165,9 @@ rewritten automatically.
   dedicated Codex home live under `$XDG_DATA_HOME/prtisan`. Operator Codex
   credentials are never mounted from the normal Codex home or stored in a target
   repository.
+- Mutable Project, Conversation, proposal, and job state lives in a separate
+  control database under `$XDG_STATE_HOME/prtisan`; global UI/worker defaults
+  live under `$XDG_CONFIG_HOME/prtisan`.
 
 ## Development
 

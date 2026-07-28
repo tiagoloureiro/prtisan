@@ -35,12 +35,52 @@ A valid schema-v1 manifest also produces this setup checkpoint; the reviewed PR
 preserves all non-Codex policy while replacing legacy review/repair settings
 with the seven schema-v2 role profiles. Malformed manifests fail closed.
 
-Authenticate Codex into the dedicated global home once (never into the target
-repository):
+In an interactive terminal, `run` starts the one-time Codex device login against
+its dedicated global home, waits for authorization, verifies those credentials
+inside the managed container, and continues the same invocation. For
+non-interactive and `--json` runs, authentication is a `waiting_external`
+checkpoint containing this fallback command:
 
 ```text
-CODEX_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/prtisan/codex-home" codex login
+CODEX_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/prtisan/codex-home" codex login --device-auth
 ```
+
+Prtisan never copies or mounts the operator's normal Codex credentials.
+
+## Projects, Conversations, and cleanup
+
+```text
+prtisan tui [--cwd /path/to/repo]
+```
+
+The TUI is a global, reconnectable agent interface backed by an on-demand local
+Worker. Projects are canonical local Git checkouts. Each Project keeps durable
+multi-turn Conversations whose agents edit isolated Docker worktrees, produce
+one checkpoint commit per successful turn, and can publish at most one pull
+request after explicit confirmation. Later turns require another confirmed
+Publish to push their checkpoints to that existing pull request. Attachments
+are captured by Prtisan and mounted read-only into the Conversation container.
+
+Turns are durable FIFO jobs within a Conversation. Different Conversations may
+run concurrently up to the global limit, and queued Turns resume after a Worker
+restart.
+
+Any local Git repository can be registered. Docker, GitHub, authentication, and
+Prtisan setup are separate capabilities whose absence disables only the
+affected action.
+
+```text
+prtisan cleanup --cwd /path/to/repo
+prtisan cleanup --all --dry-run
+```
+
+Cleanup previews containers, images, worktrees, caches, logs, and reclaimable
+sessions. It removes only resources whose Prtisan ownership can be proven and
+revalidates each target immediately before deletion. It never performs
+machine-wide Docker pruning and preserves active, dirty, shared, external,
+unlabelled, or unpublished resources. Execution uses a short-lived, one-use
+Worker authorization and can remove only candidates present in the reviewed
+preview.
 
 ## Advanced planning and recovery
 
@@ -124,8 +164,11 @@ state, blockers, and evidence.
 ## Durable state and credentials
 
 - Journal and leases: `$XDG_STATE_HOME/prtisan`
+- Projects, Conversations, proposals, and Worker jobs:
+  `$XDG_STATE_HOME/prtisan/control.sqlite`
 - Artifacts and caches: `$XDG_DATA_HOME/prtisan`
 - Dedicated Codex home: `$XDG_DATA_HOME/prtisan/codex-home`
+- Global TUI and Worker defaults: `$XDG_CONFIG_HOME/prtisan/config.json`
 
 Exports are redacted and content-addressed. Target repositories contain only the
 tracked manifest and Dockerfile, never credentials or execution records.

@@ -1,4 +1,5 @@
 import {
+  AgentAuthenticationError,
   AgentExecutionError,
   AgentInfrastructureError,
   AgentOutputError,
@@ -287,6 +288,14 @@ async function validateCurrentPullRequest(
       validation?.outcome?.reason ??
       validation?.outcome?.kind ??
       "validation did not return a successful result";
+    if (validation?.outcome?.kind === "infra_failed") {
+      deps.log?.(
+        `PR #${node.pr.number} authoritative validation infrastructure details:\n${reason}`
+      );
+      throw new AgentInfrastructureError(
+        infrastructureValidationMessage(node.pr.number, reason)
+      );
+    }
     throw new Error(
       `PR #${node.pr.number} failed authoritative validation before merge: ${reason}.`
     );
@@ -303,6 +312,20 @@ async function validateCurrentPullRequest(
   if (!refreshed) return graph;
 
   return graph;
+}
+
+function infrastructureValidationMessage(
+  pullNumber: number,
+  details: string
+): string {
+  if (isDiskCapacityFailure(details)) {
+    return `PR #${pullNumber} authoritative validation ran out of disk capacity. Free Docker storage or expand disk capacity, then rerun Prtisan.`;
+  }
+  return `PR #${pullNumber} authoritative validation infrastructure failed. Resolve the recorded infrastructure cause, then rerun Prtisan.`;
+}
+
+function isDiskCapacityFailure(message: string): boolean {
+  return /\bENOSPC\b|no space left|database or disk is full/i.test(message);
 }
 
 async function repairCiFailure(
@@ -358,6 +381,7 @@ async function repairCiFailure(
       });
     } catch (error) {
       if (
+        error instanceof AgentAuthenticationError ||
         error instanceof AgentInfrastructureError ||
         error instanceof AgentExecutionError ||
         error instanceof AgentOutputError

@@ -4,6 +4,10 @@ import {
   DockerBaseImageManager,
   requireDockerImageId,
 } from "./docker-image.js";
+import {
+  managedDockerBuildLabels,
+  managedDockerRunLabels,
+} from "./docker-ownership.js";
 import type { CommandRunner } from "./exec.js";
 import { ensureDir } from "./fs.js";
 import { joinPath, resolvePath } from "./path.js";
@@ -105,9 +109,30 @@ export class DeclaredRuntimeProvider implements RuntimeProvider {
       config: input.config,
       ref: `${input.config.remote}/${input.config.targetBranch}`,
     });
+    const packageManager = declaredPackageManager(
+      input.config.runtime.bootstrap?.command
+    );
+    const cacheMount = await packageManagerCacheMount(
+      input.cwd,
+      packageManager,
+      packageManager
+        ? stableDigest({
+            schema: RUNTIME_SCHEMA_VERSION,
+            source: "declared",
+            packageManager,
+            bootstrap: input.config.runtime.bootstrap?.command,
+          })
+        : undefined
+    );
+    const bootstrap = bootstrapWithCachePath(
+      input.config.runtime.bootstrap,
+      packageManager,
+      cacheMount?.sandboxPath
+    );
     const profileValue = {
       kind: "image" as const,
-      bootstrap: input.config.runtime.bootstrap,
+      packageManager,
+      bootstrap,
       verification: input.config.runtime.verification,
       probes: input.config.runtime.probes,
       imageId: image.id,
@@ -120,9 +145,10 @@ export class DeclaredRuntimeProvider implements RuntimeProvider {
         ...profileValue,
         fingerprint: stableDigest(profileValue),
       },
-      bootstrap: input.config.runtime.bootstrap,
+      bootstrap,
       verification: input.config.runtime.verification,
       probes: input.config.runtime.probes,
+      cacheMount,
     };
   }
 }
@@ -358,6 +384,7 @@ export class DockerRuntimeImageBuilder implements RuntimeImageBuilder {
           "build",
           "-t",
           imageName,
+          ...managedDockerBuildLabels("runtime-image"),
           "--build-arg",
           `AGENT_UID=${runtimeUid()}`,
           "--build-arg",
@@ -1304,6 +1331,16 @@ async function packageManagerCacheMount(
   };
 }
 
+function declaredPackageManager(
+  commandValue: string | undefined
+): ToolchainProfile["packageManager"] {
+  const command = commandValue?.trim();
+  if (!command) return undefined;
+  return /^(?:corepack\s+)?(pnpm|npm|yarn|bun|uv|go|cargo)(?:\s|$)/.exec(
+    command
+  )?.[1] as ToolchainProfile["packageManager"];
+}
+
 function packageManagerCachePath(
   manager: NonNullable<ToolchainProfile["packageManager"]>
 ): string {
@@ -1320,6 +1357,26 @@ function packageManagerCachePath(
             : manager === "go"
               ? "/home/agent/go/pkg/mod"
               : "/home/agent/.cargo/registry";
+}
+
+function bootstrapWithCachePath(
+  bootstrap: SandboxCommandConfig | undefined,
+  manager: ToolchainProfile["packageManager"],
+  cachePath: string | undefined
+): SandboxCommandConfig | undefined {
+  if (
+    !bootstrap ||
+    manager !== "pnpm" ||
+    !cachePath ||
+    /(?:^|\s)--store-dir(?:\s|=|$)/.test(bootstrap.command) ||
+    /(?:&&|\|\||[;|<>\n`])/.test(bootstrap.command)
+  ) {
+    return bootstrap;
+  }
+  return {
+    ...bootstrap,
+    command: `${bootstrap.command.trim()} --store-dir ${cachePath}`,
+  };
 }
 
 async function runRuntimeProbes(
@@ -1342,6 +1399,7 @@ async function runRuntimeProbes(
       [
         "run",
         "--rm",
+        ...managedDockerRunLabels("runtime-probe", cwd),
         "--user",
         `${runtimeUid()}:${runtimeGid()}`,
         "-e",
@@ -1411,6 +1469,7 @@ async function runInRuntime(
   const args = [
     "run",
     "--rm",
+    ...managedDockerRunLabels("verification", input.cwd),
     "--user",
     `${runtimeUid()}:${runtimeGid()}`,
     "-e",

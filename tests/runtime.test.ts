@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
 import {
+  DeclaredRuntimeProvider,
   DockerRuntimeImageBuilder,
   DockerVerificationRunner,
   ManifestToolchainResolver,
@@ -24,6 +25,42 @@ afterEach(async () => {
 });
 
 describe("target runtime resolution", () => {
+  test("mounts a repository-scoped pnpm store for declared bootstrap commands", async () => {
+    const cwd = await temporaryDirectory();
+    const imageId = `sha256:${"a".repeat(64)}`;
+    const provider = new DeclaredRuntimeProvider({
+      ensure: async () => ({ id: imageId, name: "prtisan:repository" }),
+    } as never);
+    const config = testConfig({
+      runtime: {
+        ...testConfig().runtime,
+        verificationMode: "explicit",
+        bootstrap: {
+          name: "Install dependencies",
+          command: "pnpm install --frozen-lockfile",
+          timeoutMs: 60_000,
+        },
+        verification: [
+          {
+            name: "Check",
+            command: "pnpm check",
+            timeoutMs: 60_000,
+          },
+        ],
+      },
+    });
+
+    const runtime = await provider.prepare({ cwd, ref: "head", config });
+
+    expect(runtime.cacheMount).toMatchObject({
+      sandboxPath: "/home/agent/.local/share/pnpm/store",
+    });
+    expect(runtime.cacheMount?.hostPath).not.toContain(cwd);
+    expect(runtime.bootstrap?.command).toBe(
+      "pnpm install --frozen-lockfile --store-dir /home/agent/.local/share/pnpm/store"
+    );
+  });
+
   test("discovers exact Node and pnpm pins and selects safe checks", async () => {
     const cwd = await temporaryDirectory();
     const runner = new SnapshotRunner({

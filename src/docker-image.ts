@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { managedDockerBuildLabels } from "./docker-ownership.js";
 import type { CommandRunner } from "./exec.js";
 import type { AgentTrainConfig } from "./types.js";
 
@@ -110,6 +111,7 @@ export class DockerBaseImageManager {
           "--provenance=false",
           "--iidfile",
           iidFile,
+          ...managedDockerBuildLabels("project-image", input.cwd),
           "--build-arg",
           `AGENT_UID=${runtimeUid()}`,
           "--build-arg",

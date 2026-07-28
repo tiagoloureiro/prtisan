@@ -85,6 +85,16 @@ export class AgentInfrastructureError extends Error {
   }
 }
 
+export class AgentAuthenticationError extends Error {
+  constructor(
+    readonly codexHome: string,
+    options?: ErrorOptions
+  ) {
+    super("Codex authentication is required for Prtisan.", options);
+    this.name = "AgentAuthenticationError";
+  }
+}
+
 export class AgentExecutionError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -481,6 +491,9 @@ export class SandcastleCodexRunner implements AgentRunner {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isAgentAuthenticationFailure(message)) {
+        throw new AgentAuthenticationError(codexHome, { cause: error });
+      }
       if (isPreAgentInfrastructureFailure(message)) {
         throw new AgentInfrastructureError(message, { cause: error });
       }
@@ -591,7 +604,13 @@ async function reconcileRunCommits(input: {
 }
 
 function isPreAgentInfrastructureFailure(message: string): boolean {
-  return /bootstrap|onSandboxReady|sandbox hook|command not found|exit(?:ed)? (?:with )?(?:code )?127|cannot connect to the docker daemon|no such image|network is unreachable|could not resolve host/i.test(
+  return /bootstrap|onSandboxReady|sandbox hook|command not found|exit(?:ed)? (?:with )?(?:code )?127|cannot connect to the docker daemon|no such image|network is unreachable|could not resolve host|\bENOSPC\b|no space left|database or disk is full/i.test(
+    message
+  );
+}
+
+function isAgentAuthenticationFailure(message: string): boolean {
+  return /\b401 Unauthorized\b|not logged in|authentication (?:expired|failed|invalid|required)|(?:access |refresh )?token (?:expired|invalid|revoked)/i.test(
     message
   );
 }

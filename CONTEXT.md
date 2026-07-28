@@ -46,3 +46,33 @@ and review-cache identity.
 
 Managed summary: The single `prtisan:summary` GitHub comment updated in place
 with the plan, snapshot, blocker, evidence, and next action.
+
+Project: A registered canonical local Git checkout managed by Prtisan. Separate
+local clones are separate Projects even when they share a GitHub remote.
+_Avoid_: Repository, workspace
+
+Conversation: A persistent multi-turn agent thread belonging to one Project. It
+owns one frozen model profile, base snapshot, managed branch, and at most one
+pull request.
+_Avoid_: Run, session, chat
+
+Turn: One user message and the corresponding agent execution within a
+Conversation. A successful editing Turn produces one checkpoint commit.
+_Avoid_: Attempt, iteration
+
+Conversation workspace: The isolated Prtisan-managed worktree and Docker
+Sandcastle in which a Conversation's agent reads and edits a Project.
+_Avoid_: Project, checkout
+
+Action proposal: A typed administrative action suggested by an agent that has
+no authority until the operator confirms it against current state.
+_Avoid_: Tool call, command
+
+Worker: The per-user background Prtisan process that owns queued work, resource
+mutation, and live event delivery to reconnectable clients.
+_Avoid_: Agent, daemon
+
+Cleanup: Conservative removal of idle, disposable resources whose Prtisan
+ownership can be proven. Cleanup preserves durable history, evidence,
+configuration, credentials, and unpublished work.
+_Avoid_: Reset, purge, Docker prune

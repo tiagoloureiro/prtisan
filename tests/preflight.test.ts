@@ -1,13 +1,81 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import type { CommandOptions, CommandResult, CommandRunner } from "@/exec.js";
-import { assertRuntimeReady, checkRuntimeReadiness } from "@/preflight.js";
+import {
+  assertRuntimeReady,
+  checkCodexAuthentication,
+  checkRuntimeReadiness,
+} from "@/preflight.js";
 import { prtisanPaths } from "@/prtisan-paths.js";
 
 import { FakeRunner, testConfig } from "./helpers.js";
 
 describe("runtime readiness", () => {
+  test("rejects a stale auth file when Codex reports that the profile is logged out", async () => {
+    const root = await mkdtemp(join(tmpdir(), "prtisan-auth-preflight-"));
+    const codexHome = join(root, "codex-home");
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(join(codexHome, "auth.json"), "{}");
+    const runner = new FakeRunner();
+    runner.enqueue("Not logged in\n", 1);
+    let imageCalls = 0;
+
+    const authentication = await checkCodexAuthentication({
+      cwd: root,
+      config: testConfig({
+        docker: { ...testConfig().docker, codexHome },
+      }),
+      runner,
+      baseImages: {
+        ensure: async () => {
+          imageCalls += 1;
+          throw new Error("image preparation must not run");
+        },
+      } as never,
+    });
+
+    expect(authentication).toMatchObject({
+      kind: "waiting",
+      codexHome,
+      loginCommand: `CODEX_HOME=${codexHome} codex login --device-auth`,
+    });
+    expect(imageCalls).toBe(0);
+  });
+
+  test("verifies authenticated credentials inside the exact managed image", async () => {
+    const root = await mkdtemp(join(tmpdir(), "prtisan-auth-container-"));
+    const codexHome = join(root, "codex-home");
+    const imageId = `sha256:${"a".repeat(64)}`;
+    const runner = new FakeRunner();
+    runner.enqueue("Logged in using ChatGPT\n");
+    runner.enqueue("Not logged in\n", 1);
+
+    const authentication = await checkCodexAuthentication({
+      cwd: root,
+      config: testConfig({
+        docker: { ...testConfig().docker, codexHome },
+      }),
+      runner,
+      baseImages: {
+        ensure: async () => ({ id: imageId, name: "prtisan:repository" }),
+      } as never,
+    });
+
+    expect(authentication.kind).toBe("waiting");
+    expect(runner.calls[1]).toMatchObject({
+      command: "docker",
+      args: expect.arrayContaining([
+        `${codexHome}:/home/agent/.codex-prtisan`,
+        imageId,
+        "login",
+        "status",
+      ]),
+    });
+  });
+
   test("returns structured diagnostics for local tools and auth", async () => {
     const runner = new FakeRunner();
     runner.enqueue("git version 2.50.0\n");
@@ -44,14 +112,11 @@ describe("runtime readiness", () => {
     );
     expect(runner.calls).toContainEqual(
       expect.objectContaining({
-        command: "test",
-        args: [
-          "-d",
-          prtisanPaths().codexHome,
-          "-a",
-          "-s",
-          `${prtisanPaths().codexHome}/auth.json`,
-        ],
+        command: "codex",
+        args: ["login", "status"],
+        options: expect.objectContaining({
+          env: { CODEX_HOME: prtisanPaths().codexHome },
+        }),
       })
     );
   });

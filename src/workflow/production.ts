@@ -1,4 +1,8 @@
-import { SandcastleCodexRunner } from "@/agent.js";
+import {
+  AgentAuthenticationError,
+  AgentInfrastructureError,
+  SandcastleCodexRunner,
+} from "@/agent.js";
 import { executeInit } from "@/commands/init.js";
 import { executeValidate } from "@/commands/validate.js";
 import { DockerBaseImageManager } from "@/docker-image.js";
@@ -14,11 +18,13 @@ import {
   loadManifestAtRef,
   ManifestMissingError,
   ManifestUpgradeRequiredError,
+  PRTISAN_DOCKERFILE_PATH,
   type PrtisanManifest,
 } from "@/manifest.js";
 import { preparePullRequestForMerge } from "@/merge-readiness.js";
 import { loadOpenPrGraph } from "@/open-pr-graph.js";
 import { joinPath } from "@/path.js";
+import { checkCodexAuthentication, codexLoginCommand } from "@/preflight.js";
 import { prtisanPaths } from "@/prtisan-paths.js";
 import { FileRepairAttemptStore } from "@/repair-attempt-store.js";
 import { FileReviewCache } from "@/review-cache.js";
@@ -26,6 +32,7 @@ import {
   DeclaredRuntimeProvider,
   DockerVerificationRunner,
 } from "@/runtime.js";
+import { managedDockerfileNeedsUpgrade } from "@/scaffold.js";
 import {
   assertSetupPlanFresh,
   createSetupPlan,
@@ -34,6 +41,7 @@ import {
 import type { AgentTrainConfig, PullRequest } from "@/types.js";
 import { changedFilesFromDiff, stableDigest } from "@/validation-hardening.js";
 import { ValidationLeaseManager } from "@/validation-lease.js";
+import { reconcilePrtisanWorktrees } from "@/worktree-cleanup.js";
 
 import type {
   FrozenPullRequest,
@@ -54,10 +62,14 @@ import {
 const SUMMARY_MARKER = "prtisan:summary";
 
 export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
+  private readonly baseImages: DockerBaseImageManager;
+
   constructor(
     private readonly runner: CommandRunner,
     private readonly log: (message: string) => void = console.error
-  ) {}
+  ) {
+    this.baseImages = new DockerBaseImageManager(runner);
+  }
 
   async setup(input: { readonly cwd: string }) {
     const plan = await createSetupPlan({
@@ -121,12 +133,13 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
     const cwd = await this.gitRoot(input.cwd);
     const discovered = await this.discoverRepository(cwd);
     await this.fetch(cwd, discovered.defaultBranch);
+    let targetRef = `origin/${discovered.defaultBranch}`;
     let loaded;
     try {
       loaded = await loadManifestAtRef({
         runner: this.runner,
         cwd,
-        ref: `origin/${discovered.defaultBranch}`,
+        ref: targetRef,
       });
     } catch (error) {
       if (
@@ -139,11 +152,27 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
     }
     if (loaded.manifest.targetBranch !== discovered.defaultBranch) {
       await this.fetch(cwd, loaded.manifest.targetBranch);
+      targetRef = `origin/${loaded.manifest.targetBranch}`;
       loaded = await loadManifestAtRef({
         runner: this.runner,
         cwd,
-        ref: `origin/${loaded.manifest.targetBranch}`,
+        ref: targetRef,
       });
+    }
+    if (loaded.manifest.sandbox.dockerfile === PRTISAN_DOCKERFILE_PATH) {
+      const dockerfile = await this.runner.run(
+        "git",
+        ["show", `${targetRef}:${PRTISAN_DOCKERFILE_PATH}`],
+        { cwd }
+      );
+      if (
+        dockerfile.exitCode === 0 &&
+        managedDockerfileNeedsUpgrade(dockerfile.stdout)
+      ) {
+        throw new SetupRequiredError(
+          `The managed Prtisan runtime on ${targetRef} needs a reviewed setup upgrade.`
+        );
+      }
     }
     const config = configFromManifest(
       discovered.repo,
@@ -185,6 +214,52 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
         };
       },
     };
+  }
+
+  async authenticate(plan: TrainPlan) {
+    const config = configFromManifest(
+      plan.repo,
+      plan.targetBranch,
+      plan.manifest as PrtisanManifest
+    );
+    const authentication = await checkCodexAuthentication({
+      cwd: plan.cwd,
+      config,
+      runner: this.runner,
+      baseImages: this.baseImages,
+    });
+    if (authentication.kind === "ready") {
+      return { kind: "ready" as const };
+    }
+    return {
+      kind: "waiting" as const,
+      codexHome: authentication.codexHome,
+      loginCommand: authentication.loginCommand,
+      message: authentication.details,
+    };
+  }
+
+  async cleanup(plan: TrainPlan): Promise<void> {
+    let cleanup;
+    try {
+      cleanup = await reconcilePrtisanWorktrees(this.runner, plan.cwd);
+    } catch (error) {
+      throw new Error(
+        `Prtisan worktree reconciliation failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        { cause: error }
+      );
+    }
+    for (const path of cleanup.removed) {
+      this.log(`Removed stale Prtisan worktree ${path}`);
+    }
+    for (const path of cleanup.preserved) {
+      this.log(`Preserved Prtisan worktree with non-cache changes at ${path}`);
+    }
+    for (const path of cleanup.skipped) {
+      this.log(`Skipped unavailable or locked Prtisan worktree ${path}`);
+    }
   }
 
   async listOpenPullRequests(plan: TrainPlan): Promise<readonly PullRequest[]> {
@@ -628,8 +703,7 @@ export class ProductionWorkflowEnvironment implements WorkflowEnvironment {
     const config = configFromManifest(plan.repo, plan.targetBranch, manifest);
     const github = new GitHubClient(this.runner, plan.cwd);
     const git = new GitClient(this.runner, plan.cwd, config);
-    const baseImages = new DockerBaseImageManager(this.runner);
-    const runtime = new DeclaredRuntimeProvider(baseImages);
+    const runtime = new DeclaredRuntimeProvider(this.baseImages);
     const paths = prtisanPaths();
     const repositoryKey = stableDigest(plan.repo);
     return {
@@ -767,11 +841,33 @@ export function configFromManifest(
   };
 }
 
-function classifyPreparationError(
+export function classifyPreparationError(
   error: unknown,
   current: PullRequest
 ): Omit<PreparationResult, "pullRequest"> {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof AgentAuthenticationError) {
+    const remediation = {
+      kind: "codex_login" as const,
+      codexHome: error.codexHome,
+      command: codexLoginCommand(error.codexHome),
+    };
+    return {
+      kind: "waiting_external",
+      blocker: {
+        category: "credentials",
+        message: "Codex authentication is required for Prtisan.",
+        remediation,
+        external: true,
+      },
+    };
+  }
+  if (error instanceof AgentInfrastructureError) {
+    return {
+      kind: "waiting_external",
+      blocker: blocker("infrastructure", message, true),
+    };
+  }
   if (/changed|stale|no longer open/i.test(message)) {
     return {
       kind: "stale",
@@ -785,7 +881,7 @@ function classifyPreparationError(
     };
   }
   if (
-    /sudo:|password is required|runner|credential|authentication|permission denied|docker daemon|network|could not resolve|no space left|service unavailable/i.test(
+    /sudo:|password is required|runner|credential|authentication|permission denied|docker daemon|network|could not resolve|\bENOSPC\b|no space left|database or disk is full|service unavailable/i.test(
       message
     )
   ) {

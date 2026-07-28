@@ -15,7 +15,7 @@
     "build": "bun build src/index.ts --target=bun --outdir=dist --packages=external && chmod +x dist/index.js && mkdir -p dist/vendor && cp -R src/vendor/code-review dist/vendor/",
     "dev": "bun run src/index.ts",
     "prtisan": "bun run src/index.ts",
-    "link-bin": "bun run build && bun link",
+    "link-bin": "bun run build && bun unlink && bun link",
     "release:pack": "mkdir -p release && rm -f release/*.tgz release/SHA256SUMS && bun run build && bun pm pack --destination release && sha256sum release/*.tgz > release/SHA256SUMS",
     "init": "bun run src/index.ts init",
     "plan": "bun run src/index.ts plan",
@@ -28,11 +28,15 @@
   },
   "dependencies": {
     "@ai-hero/sandcastle": "0.12.0",
+    "@opentui/core": "^0.4.5",
+    "@opentui/react": "^0.4.5",
+    "react": "^19.2.8",
     "zod": "^4.1.13"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.2.22",
+    "@types/react": "^19.2.17",
     "bun": "1.2.22",
     "eslint": "^10.7.0",
     "eslint-plugin-simple-import-sort": "^14.0.0",

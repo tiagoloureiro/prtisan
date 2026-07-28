@@ -5,6 +5,7 @@ import {
   type ResolvedDockerImage,
 } from "./docker-image.js";
 import type { CommandRunner } from "./exec.js";
+import { ensureDir } from "./fs.js";
 import type { GitHubClient } from "./github.js";
 import { resolveCodexHome } from "./prtisan-paths.js";
 import type { RuntimeProvider } from "./runtime.js";
@@ -16,6 +17,87 @@ export interface RuntimeReadinessDiagnostic {
   readonly name: string;
   readonly status: RuntimeReadinessStatus;
   readonly details?: string;
+}
+
+export type CodexAuthenticationReadiness =
+  | {
+      readonly kind: "ready";
+      readonly codexHome: string;
+    }
+  | {
+      readonly kind: "waiting";
+      readonly codexHome: string;
+      readonly loginCommand: string;
+      readonly details: string;
+    };
+
+export async function checkCodexAuthentication(input: {
+  readonly cwd: string;
+  readonly config: AgentTrainConfig;
+  readonly runner: CommandRunner;
+  readonly baseImages?: DockerBaseImageManager;
+}): Promise<CodexAuthenticationReadiness> {
+  const codexHome = resolveCodexHome(input.cwd, input.config.docker.codexHome);
+  await ensureDir(codexHome);
+  const loginCommand = codexLoginCommand(codexHome);
+  const host = await input.runner.run("codex", ["login", "status"], {
+    cwd: input.cwd,
+    env: { CODEX_HOME: codexHome },
+  });
+  if (host.exitCode !== 0) {
+    return {
+      kind: "waiting",
+      codexHome,
+      loginCommand,
+      details: "The dedicated Prtisan Codex profile is not authenticated.",
+    };
+  }
+
+  const baseImages =
+    input.baseImages ?? new DockerBaseImageManager(input.runner);
+  const image = await baseImages.ensure({
+    cwd: input.cwd,
+    config: input.config,
+    ref: `${input.config.remote}/${input.config.targetBranch}`,
+  });
+  const container = await input.runner.run(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "--user",
+      `${runtimeUid()}:${runtimeGid()}`,
+      "-e",
+      "HOME=/home/agent",
+      "-e",
+      "CODEX_HOME=/home/agent/.codex-prtisan",
+      "-v",
+      `${codexHome}:/home/agent/.codex-prtisan`,
+      "--entrypoint",
+      "codex",
+      image.id,
+      "login",
+      "status",
+    ],
+    {
+      cwd: input.cwd,
+      timeoutMs: input.config.validation.maxWallTimeMs,
+    }
+  );
+  if (container.exitCode !== 0) {
+    return {
+      kind: "waiting",
+      codexHome,
+      loginCommand,
+      details:
+        "The dedicated Prtisan Codex profile is not authenticated inside the managed runtime.",
+    };
+  }
+  return { kind: "ready", codexHome };
+}
+
+export function codexLoginCommand(codexHome: string): string {
+  return `CODEX_HOME=${shellQuote(codexHome)} codex login --device-auth`;
 }
 
 export async function checkRuntimeReadiness(input: {
@@ -88,21 +170,17 @@ export async function checkRuntimeReadiness(input: {
   }
 
   const codexHome = resolveCodexHome(input.cwd, input.config.docker.codexHome);
-  const codexAuthPath = `${codexHome}/auth.json`;
-  const codexHomeCheck = await input.runner.run(
-    "test",
-    ["-d", codexHome, "-a", "-s", codexAuthPath],
-    {
-      cwd: input.cwd,
-    }
-  );
+  const codexHomeCheck = await input.runner.run("codex", ["login", "status"], {
+    cwd: input.cwd,
+    env: { CODEX_HOME: codexHome },
+  });
   diagnostics.push({
     name: "Dedicated CODEX_HOME",
     status: codexHomeCheck.exitCode === 0 ? "ok" : "failed",
     details:
       codexHomeCheck.exitCode === 0
         ? `${codexHome} (authenticated)`
-        : `Shared CODEX_HOME is not authenticated at ${codexHome}. Run CODEX_HOME="${codexHome}" codex login once before running agents.`,
+        : `Shared CODEX_HOME is not authenticated at ${codexHome}. Run ${codexLoginCommand(codexHome)} once before running agents.`,
   });
 
   if (
@@ -332,6 +410,12 @@ function runtimeUid(): number {
 
 function runtimeGid(): number {
   return process.getgid?.() ?? 1000;
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 async function githubDiagnostic(

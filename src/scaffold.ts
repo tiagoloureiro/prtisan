@@ -23,6 +23,22 @@ export interface ScaffoldResult {
   readonly files: readonly ScaffoldFileResult[];
 }
 
+interface NodeDockerRuntime {
+  readonly kind: "node";
+  readonly nodeVersion: string;
+  readonly packageManager: "npm" | "pnpm" | "yarn";
+  readonly packageManagerVersion: string;
+}
+
+interface BunDockerRuntime {
+  readonly kind: "bun";
+  readonly bunVersion: string;
+}
+
+type DockerRuntime = NodeDockerRuntime | BunDockerRuntime;
+
+const MANAGED_RUNTIME_MARKER = "# prtisan:managed-runtime:v2";
+
 export async function writeScaffoldFiles(
   root: string,
   options: ScaffoldOptions
@@ -43,7 +59,7 @@ export async function writeScaffoldFiles(
     await writeManagedFile(
       root,
       PRTISAN_DOCKERFILE_PATH,
-      dockerfileContents(),
+      await recommendedDockerfile(root),
       options
     )
   );
@@ -77,20 +93,26 @@ export function summarizeScaffold(
   }, {});
 }
 
-export function dockerfileContents(): string {
+export function dockerfileContents(runtime?: DockerRuntime): string {
+  const base =
+    runtime?.kind === "node"
+      ? `node:${runtime.nodeVersion}-bookworm-slim`
+      : `oven/bun:${runtime?.bunVersion ?? "1.2.22"}-debian`;
+  const install =
+    runtime?.kind === "node"
+      ? `npm install --global @openai/codex@0.145.0 ${runtime.packageManager}@${runtime.packageManagerVersion}`
+      : "bun add --global @openai/codex@0.145.0";
   return [
-    "FROM oven/bun:1.2.22-debian",
+    MANAGED_RUNTIME_MARKER,
+    `FROM ${base}`,
     "",
     "ARG AGENT_UID=1000",
     "ARG AGENT_GID=1000",
     "",
-    "ENV BUN_INSTALL=/usr/local/share/bun",
-    "",
     "RUN apt-get update \\",
     "  && apt-get install -y --no-install-recommends git curl jq ca-certificates gh \\",
-    '  && mkdir -p "${BUN_INSTALL}" /home/agent/.codex-prtisan \\',
-    "  && bun add --global @openai/codex@0.145.0 \\",
-    '  && chmod -R a+rX "${BUN_INSTALL}" \\',
+    "  && mkdir -p /home/agent/.codex-prtisan \\",
+    `  && ${install} \\`,
     '  && chown -R "${AGENT_UID}:${AGENT_GID}" /home/agent \\',
     "  && rm -rf /var/lib/apt/lists/*",
     "",
@@ -103,6 +125,67 @@ export function dockerfileContents(): string {
     'CMD ["sleep", "infinity"]',
     "",
   ].join("\n");
+}
+
+export function managedDockerfileNeedsUpgrade(contents: string): boolean {
+  if (contents.includes(MANAGED_RUNTIME_MARKER)) return false;
+  return [
+    "FROM oven/bun:1.2.22-debian",
+    "ENV BUN_INSTALL=/usr/local/share/bun",
+    "bun add --global @openai/codex@0.145.0",
+    "ENV CODEX_HOME=/home/agent/.codex-prtisan",
+  ].every((signature) => contents.includes(signature));
+}
+
+async function recommendedDockerfile(root: string): Promise<string> {
+  const packagePath = joinPath(root, "package.json");
+  if (!(await pathExists(packagePath))) return dockerfileContents();
+  try {
+    const value = JSON.parse(await readText(packagePath)) as {
+      packageManager?: unknown;
+      engines?: { node?: unknown };
+    };
+    const declaration =
+      typeof value.packageManager === "string" ? value.packageManager : "";
+    const match = /^(bun|npm|pnpm|yarn)@(\d+\.\d+\.\d+)$/.exec(declaration);
+    if (!match) return dockerfileContents();
+    const manager = match[1] as "bun" | "npm" | "pnpm" | "yarn";
+    const version = match[2] as string;
+    if (manager === "bun") {
+      return dockerfileContents({ kind: "bun", bunVersion: version });
+    }
+    return dockerfileContents({
+      kind: "node",
+      nodeVersion: await recommendedNodeVersion(root, value.engines?.node),
+      packageManager: manager,
+      packageManagerVersion: version,
+    });
+  } catch {
+    return dockerfileContents();
+  }
+}
+
+async function recommendedNodeVersion(
+  root: string,
+  engine: unknown
+): Promise<string> {
+  for (const relativePath of [".node-version", ".nvmrc"]) {
+    const path = joinPath(root, relativePath);
+    if (!(await pathExists(path))) continue;
+    const version = exactVersion(await readText(path));
+    if (version) return version;
+  }
+  if (typeof engine === "string") {
+    const version = exactVersion(engine);
+    if (version) return version;
+    const minimum = />=\s*v?(\d+\.\d+\.\d+)/.exec(engine)?.[1];
+    if (minimum) return minimum;
+  }
+  return "22.18.0";
+}
+
+function exactVersion(value: string): string | undefined {
+  return /^v?(\d+\.\d+\.\d+)$/.exec(value.trim())?.[1];
 }
 
 async function writeManagedFile(

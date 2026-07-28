@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  AgentAuthenticationError,
   AgentInfrastructureError,
   AgentOutputError,
   type AgentReviewTask,
@@ -84,6 +85,28 @@ describe("ValidationCoordinator", () => {
     expect(agentCalls).toEqual([]);
     expect(githubMutations).toEqual([]);
     expect(gitMutations.some((call) => call.startsWith("push"))).toBe(false);
+  });
+
+  test("propagates authentication failures without recording a PR validation failure", async () => {
+    const pr = pullRequest({ number: 117 });
+    const coordinator = new ValidationCoordinator({
+      github: githubClient(pr),
+      git: gitClient([]),
+      agent: {
+        review: async () => {
+          throw new AgentAuthenticationError("/state/prtisan/codex-home");
+        },
+        repair: async () => {
+          throw new Error("repair must not run");
+        },
+      },
+      runtime: passingRuntime,
+      verification: passingVerification,
+    });
+
+    await expect(coordinator.validate(request(pr))).rejects.toBeInstanceOf(
+      AgentAuthenticationError
+    );
   });
 
   test("repairs all deduplicated blockers in one four-call batch", async () => {

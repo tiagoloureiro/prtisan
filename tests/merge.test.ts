@@ -4,6 +4,8 @@ import { AgentInfrastructureError, type AgentRunner } from "@/agent.js";
 import { executeMerge } from "@/commands/merge.js";
 import type { GitClient } from "@/git.js";
 import type { GitHubClient } from "@/github.js";
+import { preparePullRequestForMerge } from "@/merge-readiness.js";
+import { buildOpenPrGraph } from "@/open-pr-graph.js";
 import { InMemoryRepairAttemptStore } from "@/repair-attempt-store.js";
 import { VALIDATION_REVIEW_MARKER } from "@/review.js";
 import type {
@@ -153,6 +155,51 @@ describe("merge command", () => {
       )
     ).rejects.toThrow("PR #33 has 2 blocking agent validation finding(s).");
     expect(validatedPulls).toEqual([]);
+  });
+
+  test("preserves authoritative validation infrastructure failures as typed errors", async () => {
+    const pull = pullRequest({ number: 117 });
+    const logs: string[] = [];
+
+    let caught: unknown;
+    try {
+      await preparePullRequestForMerge(
+        {
+          cwd: "/repo",
+          config: testConfig(),
+          graph: buildOpenPrGraph([{ pr: pull }], "main"),
+          prNumber: pull.number,
+          runId: "merge-test",
+        },
+        {
+          github: githubSequence([[pull]]),
+          git: gitClient(),
+          log: (message) => logs.push(message),
+          validatePullRequests: async () => ({
+            pullRequests: [
+              {
+                pr: {
+                  number: 117,
+                  headRefOid: pull.headRefOid,
+                },
+                status: "validation_failed",
+                outcome: {
+                  kind: "infra_failed",
+                  reason:
+                    "Command failed (exit 1): pnpm install --frozen-lockfile\nError: database or disk is full",
+                },
+              },
+            ],
+          }),
+        }
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AgentInfrastructureError);
+    expect((caught as Error).message).toContain("disk capacity");
+    expect(logs.join("\n")).toContain("database or disk is full");
   });
 
   test("repairs failing GitHub Actions checks, waits, revalidates, and merges", async () => {

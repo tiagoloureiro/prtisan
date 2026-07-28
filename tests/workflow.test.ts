@@ -93,6 +93,28 @@ describe("Prtisan workflow", () => {
     });
   });
 
+  test("journals apply start before cleanup failures", async () => {
+    const journal = new InMemoryWorkflowJournal();
+    const environment = new FakeEnvironment(rootGraph());
+    const workflow = new PrtisanWorkflow(
+      journal,
+      new InMemoryArtifactStore(),
+      environment
+    );
+    const plan = await workflow.plan({ cwd: "/repo" });
+    environment.cleanupFailure = new Error("cleanup failed");
+
+    const result = await workflow.apply(plan.id);
+    const events = await journal.events(plan.id);
+
+    expect(result.outcome).toBe("infrastructure_failed");
+    expect(events.map((event) => event.type)).toEqual([
+      "plan_created",
+      "apply_started",
+      "workflow_blocked",
+    ]);
+  });
+
   test("runs a newly planned train through one workflow operation", async () => {
     const environment = new FakeEnvironment(rootGraph());
     const workflow = createWorkflow(environment);
@@ -110,6 +132,37 @@ describe("Prtisan workflow", () => {
     });
     expect(result.planId).toStartWith("plan-");
     expect(environment.mergeCalls).toEqual([1]);
+  });
+
+  test("returns an authentication checkpoint before persisting or applying a train", async () => {
+    const environment = new FakeEnvironment(rootGraph());
+    environment.authenticationCheckpoint = {
+      kind: "waiting",
+      codexHome: "/state/prtisan/codex-home",
+      loginCommand:
+        "CODEX_HOME=/state/prtisan/codex-home codex login --device-auth",
+    };
+    const workflow = createWorkflow(environment);
+
+    const result = await workflow.run({ cwd: "/repo" });
+
+    expect(result).toMatchObject({
+      kind: "authentication",
+      cwd: "/repo",
+      repo: "o/r",
+      outcome: "waiting_external",
+      authentication: {
+        kind: "codex_login",
+        codexHome: "/state/prtisan/codex-home",
+      },
+      blocker: {
+        category: "credentials",
+        external: true,
+      },
+    });
+    expect(environment.authenticationCalls).toBe(1);
+    expect(environment.mergeCalls).toEqual([]);
+    expect(environment.cleanupCalls).toBe(0);
   });
 
   test("resumes the latest checkpointed plan for the repository", async () => {
@@ -227,7 +280,8 @@ describe("Prtisan workflow", () => {
       blocker: {
         category: "policy",
         external: true,
-        message: "Merge setup PR #213 so .prtisan/manifest.json reaches main.",
+        message:
+          "Merge setup PR #213 so the reviewed Prtisan configuration reaches main.",
       },
     });
     expect(environment.setupCalls).toBe(1);
@@ -517,6 +571,14 @@ class FakeEnvironment implements WorkflowEnvironment {
     };
   };
   setupCalls = 0;
+  authenticationCalls = 0;
+  cleanupCalls = 0;
+  cleanupFailure?: Error;
+  authenticationCheckpoint?: {
+    readonly kind: "waiting";
+    readonly codexHome: string;
+    readonly loginCommand: string;
+  };
   private didFailAfterMerge = false;
   private didFailAfterPromotion = false;
   private didFailAfterRestack = false;
@@ -572,6 +634,16 @@ class FakeEnvironment implements WorkflowEnvironment {
       throw new Error("Fake setup checkpoint was not configured.");
     }
     return { kind: "waiting" as const, ...this.setupCheckpoint };
+  }
+
+  async authenticate() {
+    this.authenticationCalls += 1;
+    return this.authenticationCheckpoint ?? { kind: "ready" as const };
+  }
+
+  async cleanup() {
+    this.cleanupCalls += 1;
+    if (this.cleanupFailure) throw this.cleanupFailure;
   }
 
   async listOpenPullRequests(): Promise<

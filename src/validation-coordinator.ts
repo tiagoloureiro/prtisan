@@ -1,4 +1,5 @@
 import {
+  AgentAuthenticationError,
   AgentExecutionError,
   AgentInfrastructureError,
   AgentOutputError,
@@ -309,6 +310,9 @@ export class ValidationCoordinator {
           metrics,
         });
       } catch (error) {
+        if (error instanceof AgentAuthenticationError) {
+          throw error;
+        }
         if (error instanceof StaleSnapshotError) {
           return failureResult({
             pr: error.pr,

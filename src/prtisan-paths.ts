@@ -8,9 +8,15 @@ export const SHARED_CODEX_HOME = "prtisan://codex-home";
 export interface PrtisanPaths {
   readonly stateRoot: string;
   readonly dataRoot: string;
+  readonly configRoot: string;
   readonly journal: string;
+  readonly control: string;
   readonly artifacts: string;
+  readonly attachments: string;
   readonly codexHome: string;
+  readonly workerSocket: string;
+  readonly workerLock: string;
+  readonly workerLog: string;
 }
 
 export function prtisanPaths(
@@ -20,14 +26,24 @@ export function prtisanPaths(
     env.XDG_STATE_HOME?.trim() || joinPath(homedir(), ".local", "state");
   const dataBase =
     env.XDG_DATA_HOME?.trim() || joinPath(homedir(), ".local", "share");
+  const configBase =
+    env.XDG_CONFIG_HOME?.trim() || joinPath(homedir(), ".config");
   const stateRoot = joinPath(stateBase, "prtisan");
   const dataRoot = joinPath(dataBase, "prtisan");
+  const configRoot = joinPath(configBase, "prtisan");
+  const runtimeRoot = env.XDG_RUNTIME_DIR?.trim() || stateRoot;
   return {
     stateRoot,
     dataRoot,
+    configRoot,
     journal: joinPath(stateRoot, "journal.sqlite"),
+    control: joinPath(stateRoot, "control.sqlite"),
     artifacts: joinPath(dataRoot, "artifacts"),
+    attachments: joinPath(dataRoot, "attachments"),
     codexHome: joinPath(dataRoot, "codex-home"),
+    workerSocket: joinPath(runtimeRoot, "prtisan-worker.sock"),
+    workerLock: joinPath(stateRoot, "worker.lock"),
+    workerLog: joinPath(stateRoot, "worker.log"),
   };
 }
 
